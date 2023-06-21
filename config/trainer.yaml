@@ -3,7 +3,7 @@ defaults:
   - tokenizer: default
   - world_model: default
   - actor_critic: default
-  - env: default
+  - env: rs
   - datasets: default
 
 wandb:
@@ -41,7 +41,7 @@ collection:
       num_steps: 200
       burn_in: ${training.actor_critic.burn_in}
   test:
-    num_envs: 8
+    num_envs: 1
     num_episodes_to_save: ${collection.train.num_episodes_to_save}
     config:
       epsilon: 0.0
@@ -65,7 +65,7 @@ training:
     grad_acc_steps: 1
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 25
+    start_after_epochs: 25 #TODO change back to 25
     steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 64

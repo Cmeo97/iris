@@ -8,10 +8,23 @@ import gym
 import numpy as np
 from PIL import Image
 
+from robosuite.wrappers import Wrapper
+from gym.core import Env
 
-def make_atari(id, size=64, max_episode_steps=None, noop_max=30, frame_skip=4, done_on_life_loss=False, clip_reward=False):
+from .rs import PandaRoboSuite
+
+
+def make_atari(
+    id,
+    size=64,
+    max_episode_steps=None,
+    noop_max=30,
+    frame_skip=4,
+    done_on_life_loss=False,
+    clip_reward=False,
+):
     env = gym.make(id)
-    assert 'NoFrameskip' in env.spec.id or 'Frameskip' not in env.spec
+    assert "NoFrameskip" in env.spec.id or "Frameskip" not in env.spec
     env = ResizeObsWrapper(env, (size, size))
     if clip_reward:
         env = RewardClippingWrapper(env)
@@ -25,11 +38,46 @@ def make_atari(id, size=64, max_episode_steps=None, noop_max=30, frame_skip=4, d
     return env
 
 
+def make_rs(
+    task,
+    objs,
+    action_repeat,
+    seed,
+    env_config,
+):
+    env = PandaRoboSuite(env_config, task, objs, seed, action_repeat)
+    return RobosuiteIRISWrapper(env)
+
+
+class ActionSpace:
+    def __init__(self, act_space):
+        self.n = len(act_space["action"].high)
+
+
+class RobosuiteIRISWrapper(Wrapper):
+    def __init__(self, env: PandaRoboSuite) -> None:
+        super().__init__(env)
+        self.action_space = ActionSpace(env.act_space)
+
+    def reset(self):
+        obs_dict = self.env.reset()
+        return obs_dict["rgb"].transpose(1, 2, 0)
+
+    def step(self, action):
+        obs_dict = self.env.step(action)
+        obs = obs_dict["rgb"].transpose(1, 2, 0)
+        reward = obs_dict["reward"]
+        done = obs_dict["is_last"]
+        return obs, reward, done, 0
+
+
 class ResizeObsWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env, size: Tuple[int, int]) -> None:
         gym.ObservationWrapper.__init__(self, env)
         self.size = tuple(size)
-        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(size[0], size[1], 3), dtype=np.uint8)
+        self.observation_space = gym.spaces.Box(
+            low=0, high=255, shape=(size[0], size[1], 3), dtype=np.uint8
+        )
         self.unwrapped.original_obs = None
 
     def resize(self, obs: np.ndarray):
@@ -56,10 +104,10 @@ class NoopResetEnv(gym.Wrapper):
         self.noop_max = noop_max
         self.override_num_noops = None
         self.noop_action = 0
-        assert env.unwrapped.get_action_meanings()[0] == 'NOOP'
+        assert env.unwrapped.get_action_meanings()[0] == "NOOP"
 
     def reset(self, **kwargs):
-        """ Do no-op action for a number of steps in [1, noop_max]."""
+        """Do no-op action for a number of steps in [1, noop_max]."""
         self.env.reset(**kwargs)
         if self.override_num_noops is not None:
             noops = self.override_num_noops
@@ -74,7 +122,7 @@ class NoopResetEnv(gym.Wrapper):
         return obs
 
     def step(self, action):
-        return self.env.step(action)
+        return self.env.step(action[0])
 
 
 class EpisodicLifeEnv(gym.Wrapper):
@@ -109,7 +157,7 @@ class EpisodicLifeEnv(gym.Wrapper):
             obs = self.env.reset(**kwargs)
         else:
             # no-op step to advance from terminal/lost life state
-            obs, _, _, _ = self.env.step(0)
+            obs, _, _, _ = self.env.step([0])
         self.lives = self.env.unwrapped.ale.lives()
         return obs
 

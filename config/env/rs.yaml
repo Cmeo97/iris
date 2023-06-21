@@ -1,0 +1,37 @@
+train:
+  _target_: envs.make_rs
+  env_config:
+    horizon: 250
+    controller: "OSC_POSE" # "pd_ee_delta_pos"      
+    renderer:
+      fps: 30
+      size: [64, 64]
+      camera: "agentview2" # "frontview", "agentview", "eye_in_hand" for robosuite | "base_camera" for maniskill
+      depths: True
+      segmentation_level: "element" # None, class, instance or element 
+    reward_shaping: True
+    task_reward: "dense"
+    objects:
+      rgba: [1, 0, 0, 1]
+      minsize: 0.025
+      spawn_range: 0.01
+      random_placement: False
+      name: "035_power_drill" # "003_cracker_box" 
+    goal:
+      x: None
+      y: None
+      z: None
+      point_goal: False
+  task: "CustomLift"
+  objs: ["cube"]
+  seed: 0
+  action_repeat: 2
+
+test:
+  _target_: ${..train._target_}
+  env_config: ${..train.env_config}
+  task: ${..train.task}
+  objs: ${..train.objs}
+  seed: ${..train.seed}
+  action_repeat: ${..train.action_repeat}
+keymap: rs/${.train.task}
