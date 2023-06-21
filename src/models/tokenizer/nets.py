@@ -4,9 +4,12 @@ Credits to https://github.com/CompVis/taming-transformers
 
 from dataclasses import dataclass
 from typing import List
-
+from math import sqrt
+from typing import List, Optional, Union, Tuple
+from torch import Tensor
 import torch
 import torch.nn as nn
+from omegaconf import ListConfig
 
 
 @dataclass
@@ -106,97 +109,280 @@ class Encoder(nn.Module):
         h = nonlinearity(h)
         h = self.conv_out(h)
         return h
-
+    
 
 class Decoder(nn.Module):
-    def __init__(self, config: EncoderDecoderConfig) -> None:
+    def __init__(
+        self,
+        input_channels: int,
+        width: int,
+        height: int,
+        channels: List[int] = (32, 32, 32, 4),
+        kernels: List[int] = (5, 5, 5, 3),
+        strides: List[int] = (1, 1, 1, 1),
+        paddings: List[int] = (2, 2, 2, 1),
+        output_paddings: List[int] = (0, 0, 0, 0),
+        conv_transposes: List[bool] = tuple([False] * 4),
+        activations: List[str] = tuple(["relu"] * 4),
+        config: dict = {},
+    ):
         super().__init__()
+        self.conv_bone = []
         self.config = config
-        temb_ch = 0
-        self.num_resolutions = len(config.ch_mult)
+        assert len(channels) == len(kernels) == len(strides) == len(paddings)
+        if conv_transposes:
+            assert len(channels) == len(output_paddings)
+        self.pos_embedding = PositionalEmbedding(width, height, input_channels)
+        self.width = width
+        self.height = height
 
-        # compute in_ch_mult, block_in and curr_res at lowest res
-        in_ch_mult = (1,) + tuple(config.ch_mult)
-        block_in = config.ch * config.ch_mult[self.num_resolutions - 1]
-        curr_res = config.resolution // 2 ** (self.num_resolutions - 1)
-        print(f"Tokenizer : shape of latent is {config.z_channels, curr_res, curr_res}.")
+        self.conv_bone = self.make_sequential_from_config(
+            input_channels,
+            channels,
+            kernels,
+            False,
+            False,
+            paddings,
+            strides,
+            activations,
+            output_paddings,
+            conv_transposes,
+            try_inplace_activation=True,
+        )
 
-        # z to block_in
-        self.conv_in = torch.nn.Conv2d(config.z_channels,
-                                       block_in,
-                                       kernel_size=3,
-                                       stride=1,
-                                       padding=1)
+    
 
-        # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(in_channels=block_in,
-                                       out_channels=block_in,
-                                       temb_channels=temb_ch,
-                                       dropout=config.dropout)
+    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        x = self.pos_embedding(x)
+        output = self.conv_bone(x)
+        img, mask = output[:, :3], output[:, -1:]
+        return img, mask
+    
 
-        # upsampling
-        self.up = nn.ModuleList()
-        for i_level in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = config.ch * config.ch_mult[i_level]
-            for i_block in range(config.num_res_blocks + 1):
-                block.append(ResnetBlock(in_channels=block_in,
-                                         out_channels=block_out,
-                                         temb_channels=temb_ch,
-                                         dropout=config.dropout))
-                block_in = block_out
-                if curr_res in config.attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            up = nn.Module()
-            up.block = block
-            up.attn = attn
-            if i_level != 0:
-                up.upsample = Upsample(block_in, with_conv=True)
-                curr_res = curr_res * 2
-            self.up.insert(0, up)  # prepend to get consistent order
+    def make_sequential_from_config(self,
+        input_channels: int,
+        channels: List[int],
+        kernels: Union[int, List[int]],
+        batchnorms: Union[bool, List[bool]],
+        bn_affines: Union[bool, List[bool]],
+        paddings: Union[int, List[int]],
+        strides: Union[int, List[int]],
+        activations: Union[str, List[str]],
+        output_paddings: Union[int, List[int]] = 0,
+        conv_transposes: Union[bool, List[bool]] = False,
+        return_params: bool = False,
+        try_inplace_activation: bool = True,
+    ) -> Union[nn.Sequential, Tuple[nn.Sequential, dict]]:
+        # Make copy of locals and expand scalars to lists
+        params = {k: v for k, v in locals().items()}
+        params = self._scalars_to_list(params)
 
-        # end
-        self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(block_in,
-                                        config.out_ch,
-                                        kernel_size=3,
-                                        stride=1,
-                                        padding=1)
+        # Make sequential with the following order:
+        # - Conv or conv transpose
+        # - Optional batchnorm (optionally affine)
+        # - Optional activation
+        layers = []
+        layer_infos = zip(
+            params["channels"],
+            params["batchnorms"],
+            params["bn_affines"],
+            params["kernels"],
+            params["strides"],
+            params["paddings"],
+            params["activations"],
+            params["conv_transposes"],
+            params["output_paddings"],
+        )
+        for (
+            channel,
+            bn,
+            bn_affine,
+            kernel,
+            stride,
+            padding,
+            activation,
+            conv_transpose,
+            o_padding,
+        ) in layer_infos:
+            if conv_transpose:
+                layers.append(
+                    nn.ConvTranspose2d(
+                        input_channels, channel, kernel, stride, padding, o_padding
+                    )
+                )
+            else:
+                layers.append(nn.Conv2d(input_channels, channel, kernel, stride, padding))
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        temb = None  # timestep embedding
+            if bn:
+                layers.append(nn.BatchNorm2d(channel, affine=bn_affine))
+            if activation is not None:
+                layers.append(
+                    self.get_activation_module(activation, try_inplace=try_inplace_activation)
+                )
 
-        # z to block_in
-        h = self.conv_in(z)
+            # Input for next layer has half the channels of the current layer if using GLU.
+            input_channels = channel
+            if activation == "glu":
+                input_channels //= 2
 
-        # middle
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        if return_params:
+            return nn.Sequential(*layers), params
+        else:
+            return nn.Sequential(*layers)
+        
+    def get_activation_module(activation_name: str, try_inplace: bool = True) -> nn.Module:
+        if activation_name == "leakyrelu":
+            act = torch.nn.LeakyReLU()
+        elif activation_name == "elu":
+            act = torch.nn.ELU()
+        elif activation_name == "relu":
+            act = torch.nn.ReLU(inplace=try_inplace)
+        elif activation_name == "glu":
+            act = torch.nn.GLU(dim=1)  # channel dimension in images
+        elif activation_name == "sigmoid":
+            act = torch.nn.Sigmoid()
+        elif activation_name == "tanh":
+            act = torch.nn.Tanh()
+        else:
+            raise ValueError(f"Unknown activation name '{activation_name}'")
+        return act
+        
+    def _scalars_to_list(params: dict) -> dict:
+        # Channels must be a list
+        list_size = len(params["channels"])
+        # All these must be in `params` and should be expanded to list
+        allow_list = [
+            "kernels",
+            "batchnorms",
+            "bn_affines",
+            "paddings",
+            "strides",
+            "activations",
+            "output_paddings",
+            "conv_transposes",
+        ]
+        for k in allow_list:
+            if not isinstance(params[k], (tuple, list, ListConfig)):
+                params[k] = [params[k]] * list_size
+        return params
+    
 
-        # upsampling
-        for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.config.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h, temb)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
-            if i_level != 0:
-                h = self.up[i_level].upsample(h)
+    
+class PositionalEmbedding(nn.Module):
+    def __init__(self, height: int, width: int, channels: int):
+        super().__init__()
+        east = torch.linspace(0, 1, width).repeat(height)
+        west = torch.linspace(1, 0, width).repeat(height)
+        south = torch.linspace(0, 1, height).repeat(width)
+        north = torch.linspace(1, 0, height).repeat(width)
+        east = east.reshape(height, width)
+        west = west.reshape(height, width)
+        south = south.reshape(width, height).T
+        north = north.reshape(width, height).T
+        # (4, h, w)
+        linear_pos_embedding = torch.stack([north, south, west, east], dim=0)
+        linear_pos_embedding.unsqueeze_(0)  # for batch size
+        self.channels_map = nn.Conv2d(4, channels, kernel_size=1)
+        self.register_buffer("linear_position_embedding", linear_pos_embedding)
 
-        # end
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-        return h
+    def forward(self, x: Tensor) -> Tensor:
+        bs_linear_position_embedding = self.linear_position_embedding.expand(
+            x.size(0), 4, x.size(2), x.size(3)
+        )
+        x = x + self.channels_map(bs_linear_position_embedding)
+        return x
 
 
+
+#class Decoder(nn.Module):
+#    def __init__(self, config: EncoderDecoderConfig) -> None:
+#        super().__init__()
+#        self.config = config
+#        temb_ch = 0
+#        self.num_resolutions = len(config.ch_mult)
+#
+#        # compute in_ch_mult, block_in and curr_res at lowest res
+#        in_ch_mult = (1,) + tuple(config.ch_mult)
+#        block_in = config.ch * config.ch_mult[self.num_resolutions - 1]
+#        curr_res = config.resolution // 2 ** (self.num_resolutions - 1)
+#        print(f"Tokenizer : shape of latent is {config.z_channels, curr_res, curr_res}.")
+#
+#        # z to block_in
+#        self.conv_in = torch.nn.Conv2d(config.z_channels,
+#                                       block_in,
+#                                       kernel_size=3,
+#                                       stride=1,
+#                                       padding=1)
+#
+#        # middle
+#        self.mid = nn.Module()
+#        self.mid.block_1 = ResnetBlock(in_channels=block_in,
+#                                       out_channels=block_in,
+#                                       temb_channels=temb_ch,
+#                                       dropout=config.dropout)
+#        self.mid.attn_1 = AttnBlock(block_in)
+#        self.mid.block_2 = ResnetBlock(in_channels=block_in,
+#                                       out_channels=block_in,
+#                                       temb_channels=temb_ch,
+#                                       dropout=config.dropout)
+#
+#        # upsampling
+#        self.up = nn.ModuleList()
+#        for i_level in reversed(range(self.num_resolutions)):
+#            block = nn.ModuleList()
+#            attn = nn.ModuleList()
+#            block_out = config.ch * config.ch_mult[i_level]
+#            for i_block in range(config.num_res_blocks + 1):
+#                block.append(ResnetBlock(in_channels=block_in,
+#                                         out_channels=block_out,
+#                                         temb_channels=temb_ch,
+#                                         dropout=config.dropout))
+#                block_in = block_out
+#                if curr_res in config.attn_resolutions:
+#                    attn.append(AttnBlock(block_in))
+#            up = nn.Module()
+#            up.block = block
+#            up.attn = attn
+#            if i_level != 0:
+#                up.upsample = Upsample(block_in, with_conv=True)
+#                curr_res = curr_res * 2
+#            self.up.insert(0, up)  # prepend to get consistent order
+#
+#        # end
+#        self.norm_out = Normalize(block_in)
+#        self.conv_out = torch.nn.Conv2d(block_in,
+#                                        config.out_ch,
+#                                        kernel_size=3,
+#                                        stride=1,
+#                                        padding=1)
+#
+#    def forward(self, z: torch.Tensor) -> torch.Tensor:
+#        temb = None  # timestep embedding
+#
+#        # z to block_in
+#        h = self.conv_in(z)
+#
+#        # middle
+#        h = self.mid.block_1(h, temb)
+#        h = self.mid.attn_1(h)
+#        h = self.mid.block_2(h, temb)
+#
+#        # upsampling
+#        for i_level in reversed(range(self.num_resolutions)):
+#            for i_block in range(self.config.num_res_blocks + 1):
+#                h = self.up[i_level].block[i_block](h, temb)
+#                if len(self.up[i_level].attn) > 0:
+#                    h = self.up[i_level].attn[i_block](h)
+#            if i_level != 0:
+#                h = self.up[i_level].upsample(h)
+#
+#        # end
+#        h = self.norm_out(h)
+#        h = nonlinearity(h)
+#        h = self.conv_out(h)
+#        return h
+#
+#
 def nonlinearity(x: torch.Tensor) -> torch.Tensor:
     # swish
     return x * torch.sigmoid(x)
@@ -360,3 +546,69 @@ class AttnBlock(nn.Module):
         h_ = self.proj_out(h_)
 
         return x + h_
+    
+    class SlotAttentionModule(nn.Module):
+        def __init__(self, num_slots, channels_enc, dim, iters=3, eps=1e-8, hidden_dim=128):
+            super().__init__()
+            self.num_slots = num_slots
+            self.iters = iters
+            self.eps = eps
+            self.scale = dim**-0.5
+
+            self.slots_mu = nn.Parameter(torch.rand(1, 1, dim))
+            self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, dim))
+            with torch.no_grad():
+                limit = sqrt(6.0 / (1 + dim))
+                torch.nn.init.uniform_(self.slots_mu, -limit, limit)
+                torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
+            self.to_q = nn.Linear(dim, dim, bias=False)
+            self.to_k = nn.Linear(channels_enc, dim, bias=False)
+            self.to_v = nn.Linear(channels_enc, dim, bias=False)
+
+            self.gru = nn.GRUCell(dim, dim)
+
+            hidden_dim = max(dim, hidden_dim)
+
+            self.mlp = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, dim),
+            )
+
+            self.norm_input = nn.LayerNorm(channels_enc, eps=0.001)
+            self.norm_slots = nn.LayerNorm(dim, eps=0.001)
+            self.norm_pre_ff = nn.LayerNorm(dim, eps=0.001)
+            self.dim = dim
+
+        def forward(self, inputs: Tensor, num_slots: Optional[int] = None) -> Tensor:
+            b, n, _ = inputs.shape
+            if num_slots is None:
+                num_slots = self.num_slots
+
+            mu = self.slots_mu.expand(b, num_slots, -1)
+            sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
+            slots = torch.normal(mu, sigma)
+
+            inputs = self.norm_input(inputs)
+            k, v = self.to_k(inputs), self.to_v(inputs)
+
+            for _ in range(self.iters):
+                slots_prev = slots
+
+                slots = self.norm_slots(slots)
+                q = self.to_q(slots)
+
+                dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+                attn = dots.softmax(dim=1) + self.eps
+                attn = attn / attn.sum(dim=-1, keepdim=True)
+
+                updates = torch.einsum("bjd,bij->bid", v, attn)
+
+                slots = self.gru(
+                    updates.reshape(-1, self.dim), slots_prev.reshape(-1, self.dim)
+                )
+
+                slots = slots.reshape(b, -1, self.dim)
+                slots = slots + self.mlp(self.norm_pre_ff(slots))
+
+            return slots

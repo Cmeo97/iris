@@ -8,7 +8,7 @@ defaults:
 
 wandb:
   mode: online
-  project: iris
+  project: IRIS
   entity: null
   name: null
   group: null
