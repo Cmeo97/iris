@@ -65,7 +65,7 @@ training:
     grad_acc_steps: 1
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 25 #TODO change back to 25
+    start_after_epochs: 24 #TODO change back to 25
     steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 64
