@@ -165,10 +165,10 @@ class OCTokenizer(nn.Module):
 
     def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z_q.shape  # (..., E, d)
-        # z_q = z_q.view(-1, *shape[-3:])
+        z_q = z_q.view(-1, *shape[-2:])
         # z_q = self.post_quant_conv(z_q)
         rec = self.decoder(z_q)
-        # rec = rec.reshape(*shape[:-3], *rec.shape[1:])
+        rec = rec.reshape(*shape[:-2], *rec.shape[1:])
         if should_postprocess:
             rec = self.postprocess_output(rec)
         return rec
