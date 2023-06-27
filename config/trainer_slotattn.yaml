@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - tokenizer: default
+  - tokenizer: slot_attn
   - world_model: default
   - actor_critic: default
   - env: default
