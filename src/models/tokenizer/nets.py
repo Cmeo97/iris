@@ -115,16 +115,17 @@ class Decoder(nn.Module):
     def __init__(
         self,
         input_channels: int,
-        width: int,
-        height: int,
-        channels: List[int] = (32, 32, 32, 4),
-        kernels: List[int] = (5, 5, 5, 3),
-        strides: List[int] = (1, 1, 1, 1),
-        paddings: List[int] = (2, 2, 2, 1),
-        output_paddings: List[int] = (0, 0, 0, 0),
-        conv_transposes: List[bool] = tuple([False] * 4),
-        activations: List[str] = tuple(["relu"] * 4),
-        config: dict = {},
+        channels: List[int] = (32, 32, 32, 32, 4),
+        kernels: List[int] = (5, 5, 5, 5, 3),
+        strides: List[int] = (1, 1, 1, 1, 1),
+        paddings: List[int] = (2, 2, 2, 2, 1),
+        output_paddings: List[int] = (0, 0, 0, 0, 0),
+        conv_transposes: List[bool] = tuple([False] * 5),
+        activations: List[str] = tuple(["relu"] * 5),
+        width: int = 64,
+        height: int = 64,
+        config: EncoderDecoderConfig = {},
+        pos_input_channels: int = 512,
     ):
         super().__init__()
         self.conv_bone = []
@@ -132,12 +133,12 @@ class Decoder(nn.Module):
         assert len(channels) == len(kernels) == len(strides) == len(paddings)
         if conv_transposes:
             assert len(channels) == len(output_paddings)
-        self.pos_embedding = PositionalEmbedding(width, height, input_channels)
-        self.width = width
-        self.height = height
+        self.pos_embedding = PositionalEmbedding(width, height, pos_input_channels)
+        self.w_broadcast = width
+        self.h_broadcast = height
 
         self.conv_bone = self.make_sequential_from_config(
-            input_channels,
+            pos_input_channels,
             channels,
             kernels,
             False,
@@ -149,33 +150,65 @@ class Decoder(nn.Module):
             conv_transposes,
             try_inplace_activation=True,
         )
+        print('Decoder initialized')
 
     
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        x = self.pos_embedding(x)
+        x = self.spatial_broadcast(x.permute(0,2,3,1))
+        bs, ns, nts, td, w, h = x.shape                         #ns: num slots, nts: num tokens per slots, td: token_dim
+        x = self.pos_embedding(x.reshape(-1, td, w, h))
         output = self.conv_bone(x)
         img, mask = output[:, :3], output[:, -1:]
         return img, mask
     
+    def spatial_broadcast(self, slot: Tensor) -> Tensor:
+        slot = slot.unsqueeze(-1).unsqueeze(-1)
+        return slot.repeat(1, 1, 1, 1, self.w_broadcast, self.h_broadcast)
+    
 
-    def make_sequential_from_config(self,
-        input_channels: int,
-        channels: List[int],
-        kernels: Union[int, List[int]],
-        batchnorms: Union[bool, List[bool]],
-        bn_affines: Union[bool, List[bool]],
-        paddings: Union[int, List[int]],
-        strides: Union[int, List[int]],
-        activations: Union[str, List[str]],
-        output_paddings: Union[int, List[int]] = 0,
-        conv_transposes: Union[bool, List[bool]] = False,
-        return_params: bool = False,
-        try_inplace_activation: bool = True,
-    ) -> Union[nn.Sequential, Tuple[nn.Sequential, dict]]:
+    def make_sequential_from_config(self, 
+                                    input_channels: int,
+                                    channels: List[int],
+                                    kernels: Union[int, List[int]],
+                                    batchnorms: Union[bool, List[bool]],
+                                    bn_affines: Union[bool, List[bool]],
+                                    paddings: Union[int, List[int]],
+                                    strides: Union[int, List[int]],
+                                    activations: Union[str, List[str]],
+                                    output_paddings: Union[int, List[int]] = 0,
+                                    conv_transposes: Union[bool, List[bool]] = False,
+                                    return_params: bool = False,
+                                    try_inplace_activation: bool = True,
+                                ) -> Union[nn.Sequential, Tuple[nn.Sequential, dict]]:
         # Make copy of locals and expand scalars to lists
-        params = {k: v for k, v in locals().items()}
-        params = self._scalars_to_list(params)
+        params = {}
+        params["channels"] = channels
+        params["batchnorms"] = batchnorms
+        params["bn_affines"] = bn_affines
+        params["kernels"] = kernels
+        params["strides"] = strides
+        params["paddings"] = paddings
+        params["activations"] = activations
+        params["conv_transposes"] = conv_transposes
+        params["output_paddings"] = output_paddings
+        # Channels must be a list
+        list_size = len(params["channels"])
+        # All these must be in `params` and should be expanded to list
+        allow_list = [
+            "kernels",
+            "batchnorms",
+            "bn_affines",
+            "paddings",
+            "strides",
+            "activations",
+            "output_paddings",
+            "conv_transposes",
+        ]
+        for k in allow_list:
+            if not isinstance(params[k], (tuple, list, ListConfig)):
+                params[k] = [params[k]] * list_size
+        
 
         # Make sequential with the following order:
         # - Conv or conv transpose
@@ -216,9 +249,19 @@ class Decoder(nn.Module):
             if bn:
                 layers.append(nn.BatchNorm2d(channel, affine=bn_affine))
             if activation is not None:
-                layers.append(
-                    self.get_activation_module(activation, try_inplace=try_inplace_activation)
-                )
+                if activation == "leakyrelu":
+                    act = torch.nn.LeakyReLU()
+                elif activation == "elu":
+                    act = torch.nn.ELU()
+                elif activation == "relu":
+                    act = torch.nn.ReLU(inplace=try_inplace_activation)
+                elif activation == "glu":
+                    act = torch.nn.GLU(dim=1)  # channel dimension in images
+                elif activation == "sigmoid":
+                    act = torch.nn.Sigmoid()
+                elif activation == "tanh":
+                    act = torch.nn.Tanh()
+                layers.append(act)
 
             # Input for next layer has half the channels of the current layer if using GLU.
             input_channels = channel
@@ -230,41 +273,6 @@ class Decoder(nn.Module):
         else:
             return nn.Sequential(*layers)
         
-    def get_activation_module(activation_name: str, try_inplace: bool = True) -> nn.Module:
-        if activation_name == "leakyrelu":
-            act = torch.nn.LeakyReLU()
-        elif activation_name == "elu":
-            act = torch.nn.ELU()
-        elif activation_name == "relu":
-            act = torch.nn.ReLU(inplace=try_inplace)
-        elif activation_name == "glu":
-            act = torch.nn.GLU(dim=1)  # channel dimension in images
-        elif activation_name == "sigmoid":
-            act = torch.nn.Sigmoid()
-        elif activation_name == "tanh":
-            act = torch.nn.Tanh()
-        else:
-            raise ValueError(f"Unknown activation name '{activation_name}'")
-        return act
-        
-    def _scalars_to_list(params: dict) -> dict:
-        # Channels must be a list
-        list_size = len(params["channels"])
-        # All these must be in `params` and should be expanded to list
-        allow_list = [
-            "kernels",
-            "batchnorms",
-            "bn_affines",
-            "paddings",
-            "strides",
-            "activations",
-            "output_paddings",
-            "conv_transposes",
-        ]
-        for k in allow_list:
-            if not isinstance(params[k], (tuple, list, ListConfig)):
-                params[k] = [params[k]] * list_size
-        return params
     
 
     
@@ -547,68 +555,68 @@ class AttnBlock(nn.Module):
 
         return x + h_
     
-    class SlotAttentionModule(nn.Module):
-        def __init__(self, num_slots, channels_enc, dim, iters=3, eps=1e-8, hidden_dim=128):
-            super().__init__()
-            self.num_slots = num_slots
-            self.iters = iters
-            self.eps = eps
-            self.scale = dim**-0.5
+class SA(nn.Module):
+    def __init__(self, num_slots, channels_enc, dim, iters=3, eps=1e-8, hidden_dim=128):
+        super().__init__()
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim**-0.5
 
-            self.slots_mu = nn.Parameter(torch.rand(1, 1, dim))
-            self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, dim))
-            with torch.no_grad():
-                limit = sqrt(6.0 / (1 + dim))
-                torch.nn.init.uniform_(self.slots_mu, -limit, limit)
-                torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
-            self.to_q = nn.Linear(dim, dim, bias=False)
-            self.to_k = nn.Linear(channels_enc, dim, bias=False)
-            self.to_v = nn.Linear(channels_enc, dim, bias=False)
+        self.slots_mu = nn.Parameter(torch.rand(1, 1, dim))
+        self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, dim))
+        with torch.no_grad():
+            limit = sqrt(6.0 / (1 + dim))
+            torch.nn.init.uniform_(self.slots_mu, -limit, limit)
+            torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
+        self.to_q = nn.Linear(dim, dim, bias=False)
+        self.to_k = nn.Linear(channels_enc, dim, bias=False)
+        self.to_v = nn.Linear(channels_enc, dim, bias=False)
 
-            self.gru = nn.GRUCell(dim, dim)
+        self.gru = nn.GRUCell(dim, dim)
 
-            hidden_dim = max(dim, hidden_dim)
+        hidden_dim = max(dim, hidden_dim)
 
-            self.mlp = nn.Sequential(
-                nn.Linear(dim, hidden_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_dim, dim),
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, dim),
+        )
+
+        self.norm_input = nn.LayerNorm(channels_enc, eps=0.001)
+        self.norm_slots = nn.LayerNorm(dim, eps=0.001)
+        self.norm_pre_ff = nn.LayerNorm(dim, eps=0.001)
+        self.dim = dim
+
+    def forward(self, inputs: Tensor, num_slots: Optional[int] = None) -> Tensor:
+        b, n, d = inputs.shape
+        if num_slots is None:
+            num_slots = self.num_slots
+
+        mu = self.slots_mu.expand(b, num_slots, int(n/num_slots*d/self.dim), -1)
+        sigma = self.slots_log_sigma.expand(b, num_slots, int(n/num_slots*d/self.dim), -1).exp()
+        slots = torch.normal(mu, sigma)
+
+        inputs = self.norm_input(inputs)
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            slots = self.norm_slots(slots)
+            q = self.to_q(slots)[0].permute(1,0,2)
+
+            dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+            attn = dots.softmax(dim=1) + self.eps
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+
+            updates = torch.einsum("bjd,bij->bid", v, attn)
+
+            slots = self.gru(
+                updates.reshape(-1, self.dim), slots_prev.reshape(-1, self.dim)
             )
 
-            self.norm_input = nn.LayerNorm(channels_enc, eps=0.001)
-            self.norm_slots = nn.LayerNorm(dim, eps=0.001)
-            self.norm_pre_ff = nn.LayerNorm(dim, eps=0.001)
-            self.dim = dim
+            slots = slots.reshape(b, -1, self.dim)
+            slots = (slots + self.mlp(self.norm_pre_ff(slots))).reshape(b, num_slots, int(n/num_slots*d/self.dim), -1)
 
-        def forward(self, inputs: Tensor, num_slots: Optional[int] = None) -> Tensor:
-            b, n, _ = inputs.shape
-            if num_slots is None:
-                num_slots = self.num_slots
-
-            mu = self.slots_mu.expand(b, num_slots, -1)
-            sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
-            slots = torch.normal(mu, sigma)
-
-            inputs = self.norm_input(inputs)
-            k, v = self.to_k(inputs), self.to_v(inputs)
-
-            for _ in range(self.iters):
-                slots_prev = slots
-
-                slots = self.norm_slots(slots)
-                q = self.to_q(slots)
-
-                dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
-                attn = dots.softmax(dim=1) + self.eps
-                attn = attn / attn.sum(dim=-1, keepdim=True)
-
-                updates = torch.einsum("bjd,bij->bid", v, attn)
-
-                slots = self.gru(
-                    updates.reshape(-1, self.dim), slots_prev.reshape(-1, self.dim)
-                )
-
-                slots = slots.reshape(b, -1, self.dim)
-                slots = slots + self.mlp(self.norm_pre_ff(slots))
-
-            return slots
+        return slots

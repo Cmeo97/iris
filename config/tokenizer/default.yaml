@@ -1,7 +1,7 @@
 _target_: models.tokenizer.Tokenizer
 
 vocab_size: 512
-embed_dim: 512
+embed_dim: 256
 encoder:
   _target_: models.tokenizer.Encoder
   config:
@@ -17,4 +17,29 @@ encoder:
     dropout: 0.0
 decoder:
   _target_: models.tokenizer.Decoder
+  channels: [32, 32, 32, 4]
+  kernels: [5, 5, 5, 3]
+  strides: [1, 1, 1, 1]
+  paddings: [2, 2, 2, 1]
+  output_paddings: [0, 0, 0, 0]
+  activations: [relu, relu, relu, null]
+  width: 64
+  height: 64  # 64 if validating on object rooms, 128 used for clever. 
   config: ${..encoder.config}
+  conv_transposes: false
+  input_channels: 3
+#slot_attention:
+#  attention_iters: 3
+#  mlp_size: 128
+#  eps: 1e-8
+#  name: SBD
+#  num_slots: 8
+#  latent_size: 64
+
+
+
+
+
+
+
+
