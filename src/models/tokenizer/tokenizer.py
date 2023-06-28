@@ -149,12 +149,12 @@ class OCTokenizer(nn.Module):
         # z = self.pre_quant_conv(z)
         # b, e, h, w = z.shape
         # z_flattened = rearrange(z, 'b e h w -> (b h w) e')
-        b, e, d = z.shape
-        z_flattened = rearrange(z, 'b e d -> (b d) e')
+        b, k, d = z.shape
+        z_flattened = rearrange(z, 'b k d -> (b k) d')
         dist_to_embeddings = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z_flattened, self.embedding.weight.t())
 
         tokens = dist_to_embeddings.argmin(dim=-1)
-        z_q = rearrange(self.embedding(tokens), '(b d) e -> b e d', b=b, e=e, d=d).contiguous()
+        z_q = rearrange(self.embedding(tokens), '(b k) d -> b k d', b=b, k=k, d=d).contiguous()
 
         # Reshape to original
         z = z.reshape(*shape[:-3], *z.shape[1:])

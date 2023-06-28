@@ -1,20 +1,19 @@
 _target_: models.tokenizer.OCTokenizer
 
 vocab_size: 512
-embed_dim: 7
+embed_dim: 32
 encoder:
   _target_: models.tokenizer.SlotAttention
   config:
     _target_: models.tokenizer.SAConfig
     resolution: 64
-    num_slots: 7
+    num_slots: 8
     iters: 3
-    ch: 64
-    hidden_dim: 512
+    hidden_dim: 32
 decoder:
   _target_: models.tokenizer.SpatialBroadcastDecoder
   config:
     _target_: models.tokenizer.SBDecoderConfig
-    num_slots: 7
+    num_slots: 8
     resolution: 64
-    hidden_dim: 512
+    hidden_dim: 32

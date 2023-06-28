@@ -542,7 +542,6 @@ class SAConfig:
     resolution: int
     num_slots: int
     iters: int
-    ch: int
     hidden_dim: int
 
 import numpy as np
@@ -575,17 +574,17 @@ class SoftPositionEmbed(nn.Module):
         return inputs + grid
 
 class SAEncoder(nn.Module):
-    def __init__(self, resolution, ch, hidden_dim):
+    def __init__(self, resolution, hidden_dim):
         super().__init__()
 
         self.layers = nn.Sequential(
-            nn.Conv2d(3, ch, 5, padding=2),
+            nn.Conv2d(3, hidden_dim, 5, padding=2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch, ch, 5, padding=2),
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch, ch, 5, padding=2),
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch, hidden_dim, 5, padding=2),
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
             nn.ReLU(inplace=True),
         )
         self.encoder_pos = SoftPositionEmbed(hidden_dim, resolution)
@@ -604,20 +603,32 @@ class SpatialBroadcastDecoder(nn.Module):
         resolution = config.resolution
         self.config = config
 
-        self.layers = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim, 4, 3, stride=(1, 1), padding=1),
-        )
-        self.decoder_initial_size = (8, 8)
+        if hidden_dim == 64:
+            self.layers = nn.Sequential(
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, 4, 3, stride=(1, 1), padding=1),
+            )
+            self.decoder_initial_size = (8, 8)
+        elif hidden_dim == 32:
+            self.layers = nn.Sequential(
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim, 4, 3, stride=(1, 1), padding=1),
+            )
+            self.decoder_initial_size = (64, 64)
         self.decoder_pos = SoftPositionEmbed(hidden_dim, self.decoder_initial_size)
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
@@ -720,13 +731,12 @@ class SlotAttention(nn.Module):
         """
         super().__init__()
         self.config = config
-        self.ch = config.ch
         self.hidden_dim = config.hidden_dim
         self.resolution = config.resolution
         self.num_slots = config.num_slots
         self.iters = config.iters
 
-        self.encoder_cnn = SAEncoder(self.resolution, self.ch, self.hidden_dim)
+        self.encoder_cnn = SAEncoder(config.resolution, config.hidden_dim)
 
         self.fc = nn.Sequential(
             nn.Linear(config.hidden_dim, config.hidden_dim),
@@ -737,7 +747,7 @@ class SlotAttention(nn.Module):
         self.slot_attention = SlotAttentionModule(
             num_slots=config.num_slots,
             dim=config.hidden_dim,
-            iters=self.iters,
+            iters=config.iters,
             eps=1e-8, 
             hidden_dim=128)
         
