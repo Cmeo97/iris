@@ -94,7 +94,7 @@ class WorldModelEnv:
     @torch.no_grad()
     def decode_obs_tokens(self) -> List[Image.Image]:
         embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)
-        z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
+        z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(2*np.sqrt(self.num_observations_tokens)))
         rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
         return torch.clamp(rec, 0, 1)
 

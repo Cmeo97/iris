@@ -1,4 +1,5 @@
 # Custom
+*.err
 wandb
 .vscode
 outputs

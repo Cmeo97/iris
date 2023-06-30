@@ -125,7 +125,7 @@ class Decoder(nn.Module):
         width: int = 64,
         height: int = 64,
         config: EncoderDecoderConfig = {},
-        pos_input_channels: int = 512,
+        pos_input_channels: int = 128,
     ):
         super().__init__()
         self.conv_bone = []

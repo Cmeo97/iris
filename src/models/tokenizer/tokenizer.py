@@ -89,7 +89,7 @@ class Tokenizer(nn.Module):
     def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z_q.shape  # (..., E, h, w)
         z_q = z_q.view(-1, *shape[-3:])
-        z_q = self.post_quant_conv(z_q)
+        #z_q = self.post_quant_conv(z_q)
         img_slots, masks = self.decoder(z_q)
         img_slots = img_slots.view(z_q.shape[0], self.num_slots*z_q.shape[3], 3, self.width, self.height)
         masks = masks.view(z_q.shape[0], self.num_slots, z_q.shape[3], 1, self.width, self.height)
