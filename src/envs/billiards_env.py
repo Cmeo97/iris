@@ -302,7 +302,6 @@ class BillardsEnv(PhysicsEnv):
         """Overwrite step functino to ensure collisions are zeroed beforehand."""
         self.collisions = 0
         img, done, info = super().step(action)
-        done = self.collisions > 0
         return img, done, info
     
 class BilliardDiscreteActionSpace():

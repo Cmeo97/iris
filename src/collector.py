@@ -59,6 +59,11 @@ class Collector:
 
             self.obs, reward, done, _ = self.env.step(act)
 
+            # for billiard
+            if "test" in self.dataset.name and steps >= 200:
+                done = np.array([True] * self.env.num_envs)
+                self.env.update_done_tracker(done)
+
             actions.append(act)
             rewards.append(reward)
             dones.append(done)

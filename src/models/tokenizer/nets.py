@@ -24,9 +24,21 @@ class EncoderDecoderConfig:
     out_ch: int
     dropout: float
 
+@dataclass
+class OCEncoderDecoderConfig:
+    resolution: int
+    in_channels: int
+    z_channels: int
+    ch: int
+    ch_mult: List[int]
+    num_res_blocks: int
+    attn_resolutions: List[int]
+    out_ch: int
+    dropout: float
+    dec_hidden_dim: int # SBDecoder
 
 class Encoder(nn.Module):
-    def __init__(self, config: EncoderDecoderConfig) -> None:
+    def __init__(self, config: Union[EncoderDecoderConfig, OCEncoderDecoderConfig]) -> None:
         super().__init__()
         self.config = config
         self.num_resolutions = len(config.ch_mult)
@@ -246,8 +258,9 @@ class Encoder(nn.Module):
 
     
 class PositionalEmbedding(nn.Module):
-    def __init__(self, height: int, width: int, channels: int):
+    def __init__(self, resolution: List[int], channels: int):
         super().__init__()
+        height, width = resolution
         east = torch.linspace(0, 1, width).repeat(height)
         west = torch.linspace(1, 0, width).repeat(height)
         south = torch.linspace(0, 1, height).repeat(width)
@@ -524,88 +537,47 @@ class AttnBlock(nn.Module):
 
         return x + h_
 
-@dataclass
-class SAEncoderConfig:
-    channels: List[int] = (32, 32, 32, 512)
-    kernels: List[int] = (5, 5, 5, 3)
-    strides: List[int] = (1, 1, 1, 1)
-    paddings: List[int] = (2, 2, 2, 1)
-
-@dataclass
-class SBDecoderConfig:
-    resolution: int
-    num_slots: int
-    hidden_dim: int
 
 @dataclass
 class SAConfig:
-    resolution: int
     num_slots: int
     iters: int
-    hidden_dim: int
+    channels_enc: int
+    slot_dim: int
 
-import numpy as np
-def build_grid(resolution):
-    if isinstance(resolution, int):
-        resolution = (resolution, resolution)
+# class SAEncoder(nn.Module):
+#     def __init__(self, resolution, hidden_dim):
+#         super().__init__()
 
-    ranges = [np.linspace(0., 1., num=res) for res in resolution]
-    grid = np.meshgrid(*ranges, sparse=False, indexing="ij")
-    grid = np.stack(grid, axis=-1)
-    grid = np.reshape(grid, [resolution[0], resolution[1], -1])
-    grid = np.expand_dims(grid, axis=0)
-    grid = grid.astype(np.float32)
-    return torch.from_numpy(np.concatenate([grid, 1.0 - grid], axis=-1))
+#         self.layers = nn.Sequential(
+#             nn.Conv2d(3, hidden_dim, 5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
+#             nn.ReLU(inplace=True),
+#         )
+#         self.encoder_pos = SoftPositionEmbed(hidden_dim, resolution)
 
-"""Adds soft positional embedding with learnable projection."""
-class SoftPositionEmbed(nn.Module):
-    def __init__(self, hidden_size, resolution):
-        """Builds the soft position embedding layer.
-        Args:
-        hidden_size: Size of input feature dimension.
-        resolution: Integer specifying width and height of grid.
-        """
-        super().__init__()
-        self.embedding = nn.Linear(4, hidden_size, bias=True)
-        self.grid = build_grid(resolution)
-
-    def forward(self, inputs):
-        grid = self.embedding(self.grid.to(inputs.device))
-        return inputs + grid
-
-class SAEncoder(nn.Module):
-    def __init__(self, resolution, hidden_dim):
-        super().__init__()
-
-        self.layers = nn.Sequential(
-            nn.Conv2d(3, hidden_dim, 5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-            nn.ReLU(inplace=True),
-        )
-        self.encoder_pos = SoftPositionEmbed(hidden_dim, resolution)
-
-    def forward(self, x):
-        x = self.layers(x)
-        x = x.permute(0,2,3,1)
-        x = self.encoder_pos(x)
-        x = torch.flatten(x, 1, 2)
-        return x
+#     def forward(self, x):
+#         x = self.layers(x)
+#         x = x.permute(0,2,3,1)
+#         x = self.encoder_pos(x)
+#         x = torch.flatten(x, 1, 2)
+#         return x
     
 class SpatialBroadcastDecoder(nn.Module):
-    def __init__(self, config: SBDecoderConfig) -> None:
+    def __init__(self, config: OCEncoderDecoderConfig) -> None:
         super().__init__()
-        hidden_dim = config.hidden_dim
-        resolution = config.resolution
         self.config = config
+        hidden_dim = config.dec_hidden_dim
+        resolution = config.resolution
 
         if hidden_dim == 64:
             self.layers = nn.Sequential(
-                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ConvTranspose2d(config.z_channels, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
@@ -615,90 +587,85 @@ class SpatialBroadcastDecoder(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, 4, 3, stride=(1, 1), padding=1),
+                nn.ConvTranspose2d(hidden_dim, config.out_ch, 3, stride=(1, 1), padding=1),
             )
-            self.decoder_initial_size = (8, 8)
         elif hidden_dim == 32:
             self.layers = nn.Sequential(
-                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ConvTranspose2d(config.z_channels, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, 4, 3, stride=(1, 1), padding=1),
+                nn.ConvTranspose2d(hidden_dim, config.out_ch, 3, stride=(1, 1), padding=1),
             )
-            self.decoder_initial_size = (64, 64)
-        self.decoder_pos = SoftPositionEmbed(hidden_dim, self.decoder_initial_size)
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
+        self.pos_embedding = PositionalEmbedding(resolution, config.z_channels)
         self.resolution = resolution
+        print('Decoder initialized')
 
-    def forward(self, slots):
-        bs = slots.shape[0]
-        # `slots` has shape: [batch_size, num_slots, slot_size].
-        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
-        slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
-        slots = slots.repeat((1, self.decoder_initial_size[0], self.decoder_initial_size[1], 1))
-
-        x = self.decoder_pos(slots)
-        x = x.permute(0,3,1,2)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.spatial_broadcast(x.permute(0,2,3,1))
+        bs, K, nts, td, w, h = x.shape #K: num slots, nts: num tokens per slots, td: token_dim
+        x = self.pos_embedding(x.reshape(-1, td, w, h))
         x = self.layers(x)
-        x = x[:,:,:self.resolution[0], :self.resolution[1]]
-        x = x.permute(0,2,3,1)
 
         # Undo combination of slot and batch dimension; split alpha masks.
-        colors, masks = x.reshape(bs, -1, x.shape[1], x.shape[2], x.shape[3]).split([3,1], dim=-1)
-        # `colors` has shape: [batch_size, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_slots, width, height, 1].
+        colors, masks = x[:, :3], x[:, -1:]
+        colors = colors.reshape(bs, -1, 3, self.resolution[0], self.resolution[1])
+        masks = masks.reshape(bs, K, -1, 1, self.resolution[0], self.resolution[1])
+        masks = masks.softmax(dim=1)
+        masks = masks.reshape(bs, -1, 1, self.resolution[0],  self.resolution[1])
+        rec = (colors * masks).sum(dim=1)
 
-        # Normalize alpha masks over slots.
-        masks = nn.Softmax(dim=1)(masks)
-        rec = torch.sum(colors * masks, dim=1)  # Recombine image.
-        rec = rec.permute(0,3,1,2)
-        # `rec` has shape: [batch_size, width, height, num_channels].
         return rec
 
-class SlotAttentionModule(nn.Module):
-    def __init__(self, num_slots: int, dim: int, iters=3, eps=1e-8, hidden_dim=128) -> None:
-        super().__init__()
-        self.num_slots = num_slots
-        self.iters = iters
-        self.eps = eps
-        self.scale = dim**-0.5
+    def spatial_broadcast(self, slot: torch.Tensor) -> torch.Tensor:
+        slot = slot.unsqueeze(-1).unsqueeze(-1)
+        return slot.repeat(1, 1, 1, 1, self.resolution[0], self.resolution[1])
 
-        self.slots_mu = nn.Parameter(torch.rand(1, 1, dim))
-        self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, dim))
+class SlotAttention(nn.Module):
+    def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
+        super().__init__()
+        self.config = config
+        self.num_slots = config.num_slots
+        self.iters = config.iters
+        self.eps = eps
+        self.scale = config.slot_dim**-0.5
+
+        self.slots_mu = nn.Parameter(torch.rand(1, 1, config.slot_dim))
+        self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, config.slot_dim))
         with torch.no_grad():
-            limit = sqrt(6.0 / (1 + dim))
+            limit = sqrt(6.0 / (1 + config.slot_dim))
             torch.nn.init.uniform_(self.slots_mu, -limit, limit)
             torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
-        self.to_q = nn.Linear(dim, dim, bias=False)
-        self.to_k = nn.Linear(dim, dim, bias=False)
-        self.to_v = nn.Linear(dim, dim, bias=False)
+        self.to_q = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
+        self.to_k = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
+        self.to_v = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
 
-        self.gru = nn.GRUCell(dim, dim)
+        self.gru = nn.GRUCell(config.slot_dim, config.slot_dim)
 
-        hidden_dim = max(dim, hidden_dim)
+        hidden_dim = max(config.slot_dim, hidden_dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
+            nn.Linear(config.slot_dim, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, dim),
+            nn.Linear(hidden_dim, config.slot_dim),
         )
 
-        self.norm_input = nn.LayerNorm(dim, eps=0.001)
-        self.norm_slots = nn.LayerNorm(dim, eps=0.001)
-        self.norm_pre_ff = nn.LayerNorm(dim, eps=0.001)
-        self.dim = dim
+        self.norm_input = nn.LayerNorm(config.channels_enc, eps=0.001)
+        self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.dim = config.slot_dim
 
-    def forward(self, inputs: Tensor, num_slots: Optional[int] = None) -> Tensor:
-        b, n = inputs.shape[:2]
+    def forward(self, inputs: torch.Tensor, num_slots: Optional[int] = None) -> torch.Tensor:
+        b, n, d = inputs.shape
         if num_slots is None:
             num_slots = self.num_slots
 
-        mu = self.slots_mu.expand(b, num_slots, -1)
-        sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
+        mu = self.slots_mu.expand(b, num_slots, int(n/num_slots*d/self.dim), -1)
+        sigma = self.slots_log_sigma.expand(b, num_slots, int(n/num_slots*d/self.dim), -1).exp()
         slots = torch.normal(mu, sigma)
 
         inputs = self.norm_input(inputs)
@@ -708,7 +675,7 @@ class SlotAttentionModule(nn.Module):
             slots_prev = slots
 
             slots = self.norm_slots(slots)
-            q = self.to_q(slots)
+            q = self.to_q(slots)[0].permute(1,0,2)
 
             dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
             attn = dots.softmax(dim=1) + self.eps
@@ -721,47 +688,47 @@ class SlotAttentionModule(nn.Module):
             )
 
             slots = slots.reshape(b, -1, self.dim)
-            slots = slots + self.mlp(self.norm_pre_ff(slots))
+            slots = (slots + self.mlp(self.norm_pre_ff(slots))).reshape(b, num_slots, int(n/num_slots*d/self.dim), -1)
 
         return slots
 
-class SlotAttention(nn.Module):
-    def __init__(self, config: SAConfig) -> None:
-        """Builds the Slot Attention-based auto-encoder.
-        """
-        super().__init__()
-        self.config = config
-        self.hidden_dim = config.hidden_dim
-        self.resolution = config.resolution
-        self.num_slots = config.num_slots
-        self.iters = config.iters
+# class SlotAttention(nn.Module):
+#     def __init__(self, config) -> None:
+#         """Builds the Slot Attention-based auto-encoder.
+#         """
+#         super().__init__()
+#         self.config = config
+#         self.hidden_dim = config.hidden_dim
+#         self.resolution = config.resolution
+#         self.num_slots = config.num_slots
+#         self.iters = config.iters
 
-        self.encoder_cnn = SAEncoder(config.resolution, config.hidden_dim)
+#         self.encoder_cnn = Encoder(config)
 
-        self.fc = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-        )
+#         self.fc = nn.Sequential(
+#             nn.Linear(config.hidden_dim, config.hidden_dim),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(config.hidden_dim, config.hidden_dim),
+#         )
 
-        self.slot_attention = SlotAttentionModule(
-            num_slots=config.num_slots,
-            dim=config.hidden_dim,
-            iters=config.iters,
-            eps=1e-8, 
-            hidden_dim=128)
+#         self.slot_attention = SlotAttentionModule(
+#             num_slots=config.num_slots,
+#             dim=config.hidden_dim,
+#             iters=config.iters,
+#             eps=1e-8, 
+#             hidden_dim=128)
         
-    def forward(self, image):
-        # `image` has shape: [batch_size, num_channels, width, height].
+#     def forward(self, image):
+#         # `image` has shape: [batch_size, num_channels, width, height].
 
-        # Convolutional encoder with position embedding.
-        x = self.encoder_cnn(image)  # CNN Backbone.
-        x = nn.LayerNorm(x.shape[1:]).to(x.device)(x)
-        x = self.fc(x) # Feedforward network on set.
-        # `x` has shape: [batch_size, width*height, input_size].
+#         # Convolutional encoder with position embedding.
+#         x = self.encoder_cnn(image)  # CNN Backbone.
+#         x = nn.LayerNorm(x.shape[1:]).to(x.device)(x)
+#         x = self.fc(x) # Feedforward network on set.
+#         # `x` has shape: [batch_size, width*height, input_size].
 
-        # Slot Attention module.
-        slots = self.slot_attention(x)
-        # `slots` has shape: [batch_size, num_slots, slot_size].
+#         # Slot Attention module.
+#         slots = self.slot_attention(x)
+#         # `slots` has shape: [batch_size, num_slots, slot_size].
 
-        return slots
+#         return slots
