@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - tokenizer: slot_attn
-  - world_model: default
+  - world_model: slot_attn
   - actor_critic: default
   - env: billiards
   - datasets: default
@@ -68,8 +68,8 @@ training:
     start_after_epochs: 25
     steps_per_epoch: 200
   actor_critic:
-    batch_num_samples: 16
-    grad_acc_steps: 4
+    batch_num_samples: 4
+    grad_acc_steps: 16
     max_grad_norm: 10.0
     start_after_epochs: 50
     steps_per_epoch: 200

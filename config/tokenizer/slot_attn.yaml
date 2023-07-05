@@ -1,14 +1,14 @@
 _target_: models.tokenizer.OCTokenizer
 
 vocab_size: 512
-embed_dim: 256
+embed_dim: 128
 encoder:
   _target_: models.tokenizer.Encoder
   config:
     _target_: models.tokenizer.OCEncoderDecoderConfig
     resolution: 64
     in_channels: 3
-    z_channels: 512
+    z_channels: 128
     ch: 64
     ch_mult: [1, 1, 1, 1, 1]
     num_res_blocks: 2
@@ -25,5 +25,5 @@ slot_attn:
     _target_: models.tokenizer.SAConfig
     num_slots: 8
     iters: 3
-    channels_enc: 256 # same as embed_dim
+    channels_enc: 128 # same as embed_dim
     slot_dim: 256

@@ -117,7 +117,8 @@ class OCTokenizer(nn.Module):
         self.lpips = LPIPS().eval() if with_lpips else None
         self.width = encoder.config.resolution
         self.height = encoder.config.resolution
-        self.num_slots= slot_attn.config.num_slots
+        self.num_slots = slot_attn.config.num_slots
+        self.tokens_per_slot = 2
 
     def __repr__(self) -> str:
         return "tokenizer"
@@ -170,7 +171,7 @@ class OCTokenizer(nn.Module):
     def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z_q.shape  # (..., E, h, w)
         z_q = z_q.view(-1, *shape[-3:])
-        z_q = self.post_quant_conv(z_q)
+        # z_q = self.post_quant_conv(z_q)
         rec = self.decoder(z_q)
         rec = rec.reshape(*shape[:-3], *rec.shape[1:])
         if should_postprocess:
