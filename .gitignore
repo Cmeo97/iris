@@ -136,3 +136,4 @@ dmypy.json
 .pyre/
 
 clevr_robot_env/
+data/
