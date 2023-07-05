@@ -21,7 +21,7 @@ from torchvision.ops import masks_to_boxes
 import torchvision.transforms as transforms
 from torchvision.transforms import functional as F
 
-import pycocotools.mask as mask_utils
+# import pycocotools.mask as mask_utils
 
 def json_load(file):
     if isinstance(file, str):

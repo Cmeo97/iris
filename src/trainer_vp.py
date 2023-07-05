@@ -22,6 +22,7 @@ from make_reconstructions import make_reconstructions_from_batch
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed
+from clevrer_dataset import CLEVRERDataset
 
 
 class VPTrainer:
@@ -156,7 +157,7 @@ class VPTrainer:
         for _ in tqdm(range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout):
             optimizer.zero_grad()
             for _ in range(grad_acc_steps):
-                batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sample_from_start=sample_from_start)
+                batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sample_from_start)
                 batch = self._to_device(batch)
 
                 losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
@@ -251,9 +252,9 @@ class VPTrainer:
             }, self.ckpt_dir / 'optimizer.pt')
             ckpt_dataset_dir = self.ckpt_dir / 'dataset'
             ckpt_dataset_dir.mkdir(exist_ok=True, parents=False)
-            self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
-            if self.cfg.evaluation.should:
-                torch.save(self.test_dataset.num_seen_episodes, self.ckpt_dir / 'num_seen_episodes_test_dataset.pt')
+            # self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
+            # if self.cfg.evaluation.should:
+            #     torch.save(self.test_dataset.num_seen_episodes, self.ckpt_dir / 'num_seen_episodes_test_dataset.pt')
 
     def save_checkpoint(self, epoch: int, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path('checkpoints_tmp')

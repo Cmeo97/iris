@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from typing import Dict, List, Optional, Tuple
 
-from clevrer_utils import load_obj, strip_suffix, read_img, VideoReader, compact, BaseTransforms, anno2mask, masks_to_boxes_pad
+from clevrer_utils import load_obj, strip_suffix, read_img, VideoReader, compact, anno2mask, masks_to_boxes_pad
 
 Batch = Dict[str, torch.Tensor]
 
@@ -16,7 +16,7 @@ class CLEVRERDataset(Dataset):
 
     def __init__(
         self,
-        data_root,
+        data_root='./data/CLEVRER',
         split='train',
         max_n_objects=6,
         video_len=128,

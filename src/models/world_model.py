@@ -37,11 +37,18 @@ class WorldModel(nn.Module):
 
         self.pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
 
-        self.embedder = Embedder(
-            max_blocks=config.max_blocks,
-            block_masks=[act_tokens_pattern, obs_tokens_pattern],
-            embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim), nn.Embedding(obs_vocab_size, config.embed_dim)])
-        )
+        if act_vocab_size == 0:
+            self.embedder = Embedder(
+                max_blocks=config.max_blocks,
+                block_masks=[torch.ones(config.tokens_per_block)],
+                embedding_tables=nn.ModuleList([nn.Embedding(obs_vocab_size, config.embed_dim)])
+            )
+        else:
+            self.embedder = Embedder(
+                max_blocks=config.max_blocks,
+                block_masks=[act_tokens_pattern, obs_tokens_pattern],
+                embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim), nn.Embedding(obs_vocab_size, config.embed_dim)])
+            )
 
         self.head_observations = Head(
             max_blocks=config.max_blocks,
@@ -99,8 +106,11 @@ class WorldModel(nn.Module):
         with torch.no_grad():
             obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
 
-        act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
-        tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
+        if self.act_vocab_size > 0:
+            act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
+            tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
+        else:
+            tokens = rearrange(tokens, 'b l k -> b (l k)')
 
         outputs = self(tokens)
 
