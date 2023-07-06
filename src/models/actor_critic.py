@@ -261,7 +261,11 @@ class ActorCritic(nn.Module):
             all_observations.append(obs)
 
             outputs_ac = self(obs)
-            action_token = Categorical(logits=outputs_ac.logits_actions).sample()
+            action_token = outputs_ac.dist_actions.sample() 
+            action_token = ((action_token + 1) * 256/2).to(torch.long)
+            print("Action Token: ", action_token)
+            print(action_token.max())
+            print(action_token.min())
             obs, reward, done, _ = wm_env.step(
                 action_token, should_predict_next_obs=(k < horizon - 1)
             )

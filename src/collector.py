@@ -199,7 +199,8 @@ class Collector:
                 observations=torch.ByteTensor(o)
                 .permute(0, 3, 1, 2)
                 .contiguous(),  # channel-first
-                actions=torch.LongTensor(a),
+                # actions=torch.LongTensor(a),  # action are discretize
+                actions=torch.FloatTensor(a),
                 rewards=torch.FloatTensor(r),
                 ends=torch.LongTensor(d),
                 mask_padding=torch.ones(d.shape[0], dtype=torch.bool),

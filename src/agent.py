@@ -62,10 +62,10 @@ class Agent(nn.Module):
                 1,
             )
         )
-        
-        dist_actions = self.actor_critic(input_ac).dist_actions #[:, -1] / temperature
+
+        dist_actions = self.actor_critic(input_ac).dist_actions  # [:, -1] / temperature
         act_token = dist_actions.sample()
-            # if should_sample else
-            # else dist_actions.argmax(dim=-1)
+        # if should_sample else
+        # else dist_actions.argmax(dim=-1)
 
         return act_token

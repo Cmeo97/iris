@@ -31,8 +31,8 @@ class WorldModel(nn.Module):
         self.config = config
         self.transformer = Transformer(config)
 
-        all_but_last_tokens_pattern = torch.zeros(config.tokens_per_block)
-        all_but_last_tokens_pattern[-1] = 1
+        last_tokens_pattern = torch.zeros(config.tokens_per_block)
+        last_tokens_pattern[-1] = 1
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
         act_tokens_pattern[-act_vocab_size:] = 1
         obs_tokens_pattern = 1 - act_tokens_pattern
@@ -44,7 +44,7 @@ class WorldModel(nn.Module):
             block_masks=[act_tokens_pattern, obs_tokens_pattern],
             embedding_tables=nn.ModuleList(
                 [
-                    nn.Embedding(act_vocab_size, config.embed_dim),
+                    nn.Embedding(256, config.embed_dim),
                     nn.Embedding(obs_vocab_size, config.embed_dim),
                 ]
             ),
@@ -62,7 +62,7 @@ class WorldModel(nn.Module):
 
         self.head_rewards = Head(
             max_blocks=config.max_blocks,
-            block_mask=all_but_last_tokens_pattern,
+            block_mask=last_tokens_pattern,
             head_module=nn.Sequential(
                 nn.Linear(config.embed_dim, config.embed_dim),
                 nn.ReLU(),
@@ -72,7 +72,7 @@ class WorldModel(nn.Module):
 
         self.head_ends = Head(
             max_blocks=config.max_blocks,
-            block_mask=all_but_last_tokens_pattern,
+            block_mask=last_tokens_pattern,
             head_module=nn.Sequential(
                 nn.Linear(config.embed_dim, config.embed_dim),
                 nn.ReLU(),
@@ -92,10 +92,18 @@ class WorldModel(nn.Module):
         # assert num_steps <= self.config.max_tokens
         prev_steps = 0 if past_keys_values is None else past_keys_values.size
 
+        print("Tokens: ", tokens)
+        print(tokens.max())
+        print(tokens.min())
+        print(tokens.shape)
+
         sequences = self.embedder(tokens, num_steps, prev_steps) + self.pos_emb(
             prev_steps + torch.arange(num_steps, device=tokens.device)
         )
-
+        print("Sequence: ", sequences)
+        print(sequences.max())
+        print(sequences.min())
+        print(sequences.shape)
         x = self.transformer(sequences, past_keys_values)
 
         logits_observations = self.head_observations(
@@ -121,7 +129,9 @@ class WorldModel(nn.Module):
         ):  # in case we are considering a discrete state space a dimension needs to be added
             act_tokens = rearrange(batch["actions"], "b l -> b l 1")
         else:
-            act_tokens = batch["actions"]
+            act_tokens = ((batch["actions"] + 1) * self.config.embed_dim / 2).to(
+                torch.long
+            )
         tokens = rearrange(
             torch.cat((obs_tokens, act_tokens), dim=2), "b l k1 -> b (l k1)"
         )  # (B, L(K+1))
