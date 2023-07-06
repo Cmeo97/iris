@@ -41,6 +41,7 @@ class VPTrainer:
         self.start_epoch = 1
         self.device = torch.device(cfg.common.device)
 
+        self.data_dir = Path('data')
         self.ckpt_dir = Path('checkpoints')
         self.media_dir = Path('media')
         self.episode_dir = self.media_dir / 'episodes'
@@ -54,6 +55,7 @@ class VPTrainer:
             wandb.save(str(config_path))
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "src"), dst="./src")
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "scripts"), dst="./scripts")
+            self.data_dir.symlink_to(Path(hydra.utils.get_original_cwd()) / "data")
             self.ckpt_dir.mkdir(exist_ok=False, parents=False)
             self.media_dir.mkdir(exist_ok=False, parents=False)
             self.episode_dir.mkdir(exist_ok=False, parents=False)

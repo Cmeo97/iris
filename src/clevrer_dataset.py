@@ -56,6 +56,11 @@ class CLEVRERDataset(Dataset):
         self.resolution = 64
         self.name = split + '_dataset'
 
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),  # [3, H, W]
+            transforms.Resize((self.resolution, self.resolution)),
+        ])
+
     def _process_mask(self, mask):
         if isinstance(mask, np.ndarray):
             mask = torch.from_numpy(mask).long()
@@ -111,7 +116,7 @@ class CLEVRERDataset(Dataset):
         if any(frame is None for frame in frames):
             raise ValueError
         frames = [
-            Image.fromarray(img).convert('RGB')
+            self.transform(Image.fromarray(img).convert('RGB'))
             for img in frames
         ]  # [T, C, H, W]
         return torch.stack(frames, dim=0).float()
@@ -188,7 +193,7 @@ class CLEVRERDataset(Dataset):
             data_dict['error_flag'] = True
             return data_dict
         video = [
-            Image.fromarray(frame).convert('RGB')
+            self.transform(Image.fromarray(frame).convert('RGB'))
             for frame in video[::self.frame_offset]
         ] # [T, C, H, W]
         return {
@@ -201,7 +206,8 @@ class CLEVRERDataset(Dataset):
         """Get path for all videos."""
         # test set doesn't have annotation json files
         if self.split == 'train':
-            start, end = 0, 10000
+            # start, end = 0, 10000
+            start, end = 0, 1000
         elif self.split == 'val':
             start, end = 10000, 15000
         else:
@@ -302,7 +308,7 @@ class CLEVRERDataset(Dataset):
         return self._collate_episodes_segments(self._sample_episodes_segments(batch_num_samples, sequence_length, sample_from_start))
 
     def _sample_episodes_segments(self, batch_num_samples: int, sequence_length: int, sample_from_start: bool) -> List[Dict]:
-        sampled_episode_ids = np.random.choices(range(self.files), size=batch_num_samples)
+        sampled_episode_ids = np.random.choice(range(len(self.files)), size=batch_num_samples)
 
         sampled_episodes_segments = []
         for episode_idx in sampled_episode_ids:
