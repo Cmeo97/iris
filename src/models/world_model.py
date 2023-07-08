@@ -29,6 +29,9 @@ class WorldModel(nn.Module):
         self.config = config
         self.transformer = Transformer(config)
 
+        if act_vocab_size == 0:
+            config.tokens_per_block = config.tokens_per_block - 1
+
         all_but_last_obs_tokens_pattern = torch.ones(config.tokens_per_block)
         all_but_last_obs_tokens_pattern[-2] = 0
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
@@ -49,16 +52,27 @@ class WorldModel(nn.Module):
                 block_masks=[act_tokens_pattern, obs_tokens_pattern],
                 embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim), nn.Embedding(obs_vocab_size, config.embed_dim)])
             )
-
-        self.head_observations = Head(
-            max_blocks=config.max_blocks,
-            block_mask=all_but_last_obs_tokens_pattern,
-            head_module=nn.Sequential(
-                nn.Linear(config.embed_dim, config.embed_dim),
-                nn.ReLU(),
-                nn.Linear(config.embed_dim, obs_vocab_size)
+        
+        if act_vocab_size == 0:
+            self.head_observations = Head(
+                max_blocks=config.max_blocks,
+                block_mask=torch.ones(config.tokens_per_block),
+                head_module=nn.Sequential(
+                    nn.Linear(config.embed_dim, config.embed_dim),
+                    nn.ReLU(),
+                    nn.Linear(config.embed_dim, obs_vocab_size)
+                )
             )
-        )
+        else:
+            self.head_observations = Head(
+                max_blocks=config.max_blocks,
+                block_mask=all_but_last_obs_tokens_pattern,
+                head_module=nn.Sequential(
+                    nn.Linear(config.embed_dim, config.embed_dim),
+                    nn.ReLU(),
+                    nn.Linear(config.embed_dim, obs_vocab_size)
+                )
+            )
 
         self.head_rewards = Head(
             max_blocks=config.max_blocks,
@@ -106,11 +120,11 @@ class WorldModel(nn.Module):
         with torch.no_grad():
             obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
 
-        if self.act_vocab_size > 0:
-            act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
-            tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
-        else:
-            tokens = rearrange(tokens, 'b l k -> b (l k)')
+        # if self.act_vocab_size > 0:
+        #     act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
+        #     tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
+        # else:
+        tokens = rearrange(obs_tokens, 'b l k -> b (l k)')
 
         outputs = self(tokens)
 
@@ -121,6 +135,8 @@ class WorldModel(nn.Module):
         loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
         loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 
+        if self.act_vocab_size == 0:
+            return LossWithIntermediateLosses(loss_obs=loss_obs)
         return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
 
     def compute_labels_world_model(self, obs_tokens: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

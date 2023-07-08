@@ -22,6 +22,7 @@ from make_reconstructions import make_reconstructions_from_batch
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed
+from clevrer_dataset import CLEVRERDataset
 
 
 class VPTrainer:
@@ -40,6 +41,7 @@ class VPTrainer:
         self.start_epoch = 1
         self.device = torch.device(cfg.common.device)
 
+        self.data_dir = Path('data')
         self.ckpt_dir = Path('checkpoints')
         self.media_dir = Path('media')
         self.episode_dir = self.media_dir / 'episodes'
@@ -53,6 +55,7 @@ class VPTrainer:
             wandb.save(str(config_path))
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "src"), dst="./src")
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "scripts"), dst="./scripts")
+            self.data_dir.symlink_to(Path(hydra.utils.get_original_cwd()) / "data")
             self.ckpt_dir.mkdir(exist_ok=False, parents=False)
             self.media_dir.mkdir(exist_ok=False, parents=False)
             self.episode_dir.mkdir(exist_ok=False, parents=False)
@@ -60,28 +63,28 @@ class VPTrainer:
 
         episode_manager_train = EpisodeDirManager(self.episode_dir / 'train', max_num_episodes=cfg.collection.train.num_episodes_to_save)
         episode_manager_test = EpisodeDirManager(self.episode_dir / 'test', max_num_episodes=cfg.collection.test.num_episodes_to_save)
-        self.episode_manager_imagination = EpisodeDirManager(self.episode_dir / 'imagination', max_num_episodes=cfg.evaluation.actor_critic.num_episodes_to_save)
+        # self.episode_manager_imagination = EpisodeDirManager(self.episode_dir / 'imagination', max_num_episodes=cfg.evaluation.actor_critic.num_episodes_to_save)
 
         def create_env(cfg_env, num_envs):
             env_fn = partial(instantiate, config=cfg_env)
             return MultiProcessEnv(env_fn, num_envs, should_wait_num_envs_ratio=1.0) if num_envs > 1 else SingleProcessEnv(env_fn)
 
-        if self.cfg.training.should:
-            train_env = create_env(cfg.env.train, cfg.collection.train.num_envs)
-            self.train_dataset = instantiate(cfg.datasets.train)
-            self.train_collector = Collector(train_env, self.train_dataset, episode_manager_train)
+        # if self.cfg.training.should:
+        #     train_env = create_env(cfg.env.train, cfg.collection.train.num_envs)
+        #     self.train_collector = Collector(train_env, self.train_dataset, episode_manager_train)
+        self.train_dataset = instantiate(cfg.datasets.train)
         
-        if self.cfg.evaluation.should:
-            test_env = create_env(cfg.env.test, cfg.collection.test.num_envs)
-            self.test_dataset = instantiate(cfg.datasets.test)
-            self.test_collector = Collector(test_env, self.test_dataset, episode_manager_test)
-        
+        # if self.cfg.evaluation.should:
+        #     test_env = create_env(cfg.env.test, cfg.collection.test.num_envs)
+        #     self.test_collector = Collector(test_env, self.test_dataset, episode_manager_test)
+        self.test_dataset = instantiate(cfg.datasets.test)
+
         assert self.cfg.training.should or self.cfg.evaluation.should
-        env = train_env if self.cfg.training.should else test_env
+        # env = train_env if self.cfg.training.should else test_env
 
         tokenizer = instantiate(cfg.tokenizer)
         world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=0, config=instantiate(cfg.world_model))
-        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions) # actor critic won't be used
+        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=0) # actor critic won't be used
         self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
         print(f'{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model')
@@ -106,13 +109,13 @@ class VPTrainer:
             to_log = []
 
             if self.cfg.training.should:
-                if epoch <= self.cfg.collection.train.stop_after_epochs:
-                    to_log += self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config)
+                # if epoch <= self.cfg.collection.train.stop_after_epochs:
+                #     to_log += self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config)
                 to_log += self.train_agent(epoch)
 
             if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0):
-                self.test_dataset.clear()
-                to_log += self.test_collector.collect(self.agent, epoch, **self.cfg.collection.test.config)
+                # self.test_dataset.clear()
+                # to_log += self.test_collector.collect(self.agent, epoch, **self.cfg.collection.test.config)
                 to_log += self.eval_agent(epoch)
 
             if self.cfg.training.should:
@@ -156,14 +159,14 @@ class VPTrainer:
         for _ in tqdm(range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout):
             optimizer.zero_grad()
             for _ in range(grad_acc_steps):
-                batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sampling_weights, sample_from_start)
+                batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sample_from_start)
                 batch = self._to_device(batch)
 
                 losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
                 loss_total_step = losses.loss_total
                 loss_total_step.backward()
                 loss_total_epoch += loss_total_step.item() / steps_per_epoch
-
+ 
                 for loss_name, loss_value in losses.intermediate_losses.items():
                     intermediate_losses[f"{str(component)}/train/{loss_name}"] += loss_value / steps_per_epoch
 
@@ -174,7 +177,6 @@ class VPTrainer:
 
         metrics = {f'{str(component)}/train/total_loss': loss_total_epoch, **intermediate_losses}
         return metrics
-
 
     @torch.no_grad()
     def eval_agent(self, epoch: int) -> None:
@@ -252,9 +254,9 @@ class VPTrainer:
             }, self.ckpt_dir / 'optimizer.pt')
             ckpt_dataset_dir = self.ckpt_dir / 'dataset'
             ckpt_dataset_dir.mkdir(exist_ok=True, parents=False)
-            self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
-            if self.cfg.evaluation.should:
-                torch.save(self.test_dataset.num_seen_episodes, self.ckpt_dir / 'num_seen_episodes_test_dataset.pt')
+            # self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
+            # if self.cfg.evaluation.should:
+            #     torch.save(self.test_dataset.num_seen_episodes, self.ckpt_dir / 'num_seen_episodes_test_dataset.pt')
 
     def save_checkpoint(self, epoch: int, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path('checkpoints_tmp')
