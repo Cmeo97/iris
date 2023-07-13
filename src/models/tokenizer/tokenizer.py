@@ -3,7 +3,7 @@ Credits to https://github.com/CompVis/taming-transformers
 """
 
 from dataclasses import dataclass
-from typing import Any, Tuple
+from typing import Any, Tuple, Union
 
 from einops import rearrange
 import torch
@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from dataset import Batch
 from .lpips import LPIPS
-from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder
+from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder
 from utils import LossWithIntermediateLosses
 
 
@@ -104,7 +104,7 @@ class Tokenizer(nn.Module):
         return y.add(1).div(2)
 
 class OCTokenizer(nn.Module):
-    def __init__(self, vocab_size: int, embed_dim: int, encoder: Encoder, decoder: SpatialBroadcastDecoder, slot_attn: SlotAttention, with_lpips: bool = True) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: SpatialBroadcastDecoder, slot_attn: SlotAttention, with_lpips: bool = True) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.encoder = encoder
@@ -118,7 +118,7 @@ class OCTokenizer(nn.Module):
         self.width = encoder.config.resolution
         self.height = encoder.config.resolution
         self.num_slots = slot_attn.config.num_slots
-        self.tokens_per_slot = 2
+        self.tokens_per_slot = slot_attn.config.tokens_per_slot
 
     def __repr__(self) -> str:
         return "tokenizer"
@@ -153,13 +153,14 @@ class OCTokenizer(nn.Module):
         z = self.encoder(x)
         z = self.pre_quant_conv(z)
         b, e, h, w = z.shape
-        z_flattened = rearrange(z, 'b e h w -> (b h w) e')
-        slots = self.slot_attn(z_flattened.unsqueeze(0)).reshape(z_flattened.shape)
+        z_flattened = rearrange(z, 'b e h w -> b (h w) e')
+        z = self.slot_attn(z_flattened)
+        z = rearrange(z, 'b k (t e) -> (b k t) e', t=self.tokens_per_slot)
 
-        dist_to_embeddings = torch.sum(slots ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(slots, self.embedding.weight.t())
+        dist_to_embeddings = torch.sum(z ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z, self.embedding.weight.t())
 
         tokens = dist_to_embeddings.argmin(dim=-1)
-        z_q = rearrange(self.embedding(tokens), '(b h w) e -> b e h w', b=b, e=e, h=self.num_slots, w=int(h*w/self.num_slots)).contiguous()
+        z_q = rearrange(self.embedding(tokens), '(b k t) e -> b e k t', b=b, e=e, k=self.num_slots, t=self.tokens_per_slot).contiguous()
 
         # Reshape to original
         z = z.reshape(*shape[:-3], *z_q.shape[1:])
@@ -171,7 +172,7 @@ class OCTokenizer(nn.Module):
     def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z_q.shape  # (..., E, h, w)
         z_q = z_q.view(-1, *shape[-3:])
-        # z_q = self.post_quant_conv(z_q)
+        z_q = self.post_quant_conv(z_q)
         rec = self.decoder(z_q)
         rec = rec.reshape(*shape[:-3], *rec.shape[1:])
         if should_postprocess:

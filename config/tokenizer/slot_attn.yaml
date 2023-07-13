@@ -23,7 +23,8 @@ slot_attn:
   _target_: models.tokenizer.SlotAttention
   config:
     _target_: models.tokenizer.SAConfig
-    num_slots: 8
+    num_slots: 8 # num_tokens = num_slots * tokens_per_slot
+    tokens_per_slot: 2
     iters: 3
     channels_enc: 128 # same as embed_dim
-    slot_dim: 256
+    token_dim: 128

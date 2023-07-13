@@ -541,32 +541,49 @@ class AttnBlock(nn.Module):
 @dataclass
 class SAConfig:
     num_slots: int
+    tokens_per_slot: int
     iters: int
     channels_enc: int
-    slot_dim: int
+    token_dim: int
 
-# class SAEncoder(nn.Module):
-#     def __init__(self, resolution, hidden_dim):
-#         super().__init__()
+    @property
+    def slot_dim(self):
+        return self.tokens_per_slot * self.token_dim
 
-#         self.layers = nn.Sequential(
-#             nn.Conv2d(3, hidden_dim, 5, padding=2),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2),
-#             nn.ReLU(inplace=True),
-#         )
-#         self.encoder_pos = SoftPositionEmbed(hidden_dim, resolution)
+class SAEncoder(nn.Module):
+    def __init__(self, config: OCEncoderDecoderConfig) -> None:
+        super().__init__()
+        self.config = config
+        resolution = config.resolution
 
-#     def forward(self, x):
-#         x = self.layers(x)
-#         x = x.permute(0,2,3,1)
-#         x = self.encoder_pos(x)
-#         x = torch.flatten(x, 1, 2)
-#         return x
+        self.conv_bone = nn.Sequential(
+            nn.Conv2d(3, 32, 5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, config.z_channels, 5, padding=2),
+            nn.ReLU(inplace=True),
+        )
+        if isinstance(resolution, int):
+            resolution = (resolution, resolution)
+        self.pos_embedding = PositionalEmbedding(resolution, config.z_channels)
+        self.lnorm = nn.GroupNorm(1, config.z_channels, affine=True, eps=0.001)
+        self.conv_1x1 = nn.Sequential(
+            nn.Conv1d(config.z_channels, config.z_channels, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(config.z_channels, config.z_channels, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        conv_output = self.conv_bone(x)
+        out = self.pos_embedding(conv_output)
+        out = out.flatten(2, 3) # bs x c x (w * h)
+        out = self.lnorm(out)
+        out = self.conv_1x1(out)
+        out = conv_output.reshape(conv_output.shape) # bs x c x w x h
+        return out
     
 class SpatialBroadcastDecoder(nn.Module):
     def __init__(self, config: OCEncoderDecoderConfig) -> None:
@@ -631,8 +648,10 @@ class SpatialBroadcastDecoder(nn.Module):
 class SlotAttention(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
         super().__init__()
+        assert config.slot_dim % config.tokens_per_slot == 0
         self.config = config
         self.num_slots = config.num_slots
+        self.tokens_per_slot = config.tokens_per_slot
         self.iters = config.iters
         self.eps = eps
         self.scale = config.slot_dim**-0.5
@@ -660,15 +679,15 @@ class SlotAttention(nn.Module):
         self.norm_input = nn.LayerNorm(config.channels_enc, eps=0.001)
         self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
         self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
-        self.dim = config.slot_dim
+        self.slot_dim = config.slot_dim
 
     def forward(self, inputs: torch.Tensor, num_slots: Optional[int] = None) -> torch.Tensor:
         b, n, d = inputs.shape
         if num_slots is None:
             num_slots = self.num_slots
 
-        mu = self.slots_mu.expand(b, num_slots, int(n/num_slots*d/self.dim), -1)
-        sigma = self.slots_log_sigma.expand(b, num_slots, int(n/num_slots*d/self.dim), -1).exp()
+        mu = self.slots_mu.expand(b, num_slots, -1)
+        sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
         slots = torch.normal(mu, sigma)
 
         inputs = self.norm_input(inputs)
@@ -678,7 +697,7 @@ class SlotAttention(nn.Module):
             slots_prev = slots
 
             slots = self.norm_slots(slots)
-            q = self.to_q(slots)[0].permute(1,0,2)
+            q = self.to_q(slots)
 
             dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
             attn = dots.softmax(dim=1) + self.eps
@@ -687,11 +706,11 @@ class SlotAttention(nn.Module):
             updates = torch.einsum("bjd,bij->bid", v, attn)
 
             slots = self.gru(
-                updates.reshape(-1, self.dim), slots_prev.reshape(-1, self.dim)
+                updates.reshape(-1, self.slot_dim), slots_prev.reshape(-1, self.slot_dim)
             )
 
-            slots = slots.reshape(b, -1, self.dim)
-            slots = (slots + self.mlp(self.norm_pre_ff(slots))).reshape(b, num_slots, int(n/num_slots*d/self.dim), -1)
+            slots = slots.reshape(b, -1, self.slot_dim)
+            slots = (slots + self.mlp(self.norm_pre_ff(slots)))
 
         return slots
 
