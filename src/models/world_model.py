@@ -120,11 +120,11 @@ class WorldModel(nn.Module):
         with torch.no_grad():
             obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
 
-        # if self.act_vocab_size > 0:
-        #     act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
-        #     tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
-        # else:
-        tokens = rearrange(obs_tokens, 'b l k -> b (l k)')
+        if self.act_vocab_size == 0:
+            tokens = rearrange(obs_tokens, 'b l k -> b (l k)')
+        else:
+            act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
+            tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
 
         outputs = self(tokens)
 
