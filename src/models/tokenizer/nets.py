@@ -605,7 +605,7 @@ class SpatialBroadcastDecoder(nn.Module):
         self.resolution = resolution
         print('Decoder initialized')
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_indiv_slots=False) -> torch.Tensor:
         x = self.spatial_broadcast(x.permute(0,2,3,1))
         bs, K, nts, td, w, h = x.shape #K: num slots, nts: num tokens per slots, td: token_dim
         x = self.pos_embedding(x.reshape(-1, td, w, h))
@@ -618,6 +618,9 @@ class SpatialBroadcastDecoder(nn.Module):
         masks = masks.softmax(dim=1)
         masks = masks.reshape(bs, -1, 1, self.resolution[0],  self.resolution[1])
         rec = (colors * masks).sum(dim=1)
+
+        if return_indiv_slots:
+            return rec, colors, masks
 
         return rec
 

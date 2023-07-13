@@ -177,11 +177,28 @@ class OCTokenizer(nn.Module):
         if should_postprocess:
             rec = self.postprocess_output(rec)
         return rec
+    
+    def decode_slots(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
+        shape = z_q.shape  # (..., E, h, w)
+        z_q = z_q.view(-1, *shape[-3:])
+        # z_q = self.post_quant_conv(z_q)
+        rec, color, mask = self.decoder(z_q, return_indiv_slots=True)
+        rec = rec.reshape(*shape[:-3], *rec.shape[1:])
+        color = color.reshape(*shape[:-3], *color.shape[1:])
+        mask = mask.reshape(*shape[:-3], *mask.shape[1:])
+        if should_postprocess:
+            rec = self.postprocess_output(rec)
+        return rec, color, mask
 
     @torch.no_grad()
     def encode_decode(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
         z_q = self.encode(x, should_preprocess).z_quantized
         return self.decode(z_q, should_postprocess)
+    
+    @torch.no_grad()
+    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
+        z_q = self.encode(x, should_preprocess).z_quantized
+        return self.decode_slots(z_q, should_postprocess)
 
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
         """x is supposed to be channels first and in [0, 1]"""
