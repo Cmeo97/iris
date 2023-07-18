@@ -16,9 +16,10 @@ import wandb
 
 from agent import Agent
 from collector import Collector
+# from collector import VIPERCollector as Collector
 from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
-from make_reconstructions import make_reconstructions_from_batch
+from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed
@@ -97,6 +98,12 @@ class Trainer:
         if cfg.common.resume:
             self.load_checkpoint()
 
+        try:
+            self.slot_based = cfg.common.slot_based
+            print("The model is slot-based")
+        except:
+            self.slot_based = False
+    
     def run(self) -> None:
 
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
@@ -197,7 +204,10 @@ class Trainer:
 
         if cfg_tokenizer.save_reconstructions:
             batch = self._to_device(self.test_dataset.sample_batch(batch_num_samples=3, sequence_length=self.cfg.common.sequence_length))
-            make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+            if self.slot_based:
+                make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+            else:
+                make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
 
         return [metrics_tokenizer, metrics_world_model]
 
@@ -282,3 +292,80 @@ class Trainer:
 
     def finish(self) -> None:
         wandb.finish()
+
+    @torch.no_grad()
+    def run_vis(self, try_slots: bool = False):
+        from einops import rearrange
+        from PIL import Image
+        from torchvision.utils import save_image
+
+        if try_slots:
+            from make_reconstructions import reconstruct_through_tokenizer_with_slots as reconstruct_through_tokenizer
+        else:
+            from make_reconstructions import reconstruct_through_tokenizer
+
+        num_samples = 20
+
+        vis_dir = self.reconstructions_dir
+        if self.cfg.common.resume:
+            vis_dir = self.media_dir / 'visualizations'
+            vis_dir.mkdir(exist_ok=True, parents=True)
+
+        start_time = time.time()
+        to_log = []
+
+        to_log += self.train_collector.collect(self.agent, epoch=0, **self.cfg.collection.train.config)
+
+        self.test_dataset.clear()
+        to_log += self.test_collector.collect(self.agent, epoch=0, **self.cfg.collection.test.config)
+        # to_log += self.eval_agent(epoch=0)
+
+        train_batch = self._to_device(self.train_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
+        test_batch = self._to_device(self.test_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
+
+        inputs = rearrange(train_batch['observations'], 'b t c h w -> (b t) c h w')
+        outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
+        b, t, _, _, _ = train_batch['observations'].size()
+        if try_slots:
+            recons, colors, masks = outputs
+            recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
+            colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
+            masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
+        else:
+            recons = outputs
+            recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
+
+        for i in tqdm(range(num_samples)):
+            train_obs = train_batch['observations'][i].cpu() # (t c h w)
+            recon_obs = recons[i].cpu() # (t c h w)
+
+            full_plot = torch.cat([train_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
+            if try_slots:
+                color = colors[i].cpu()
+                mask = masks[i].cpu()
+                subimage = color * mask
+                mask = mask.repeat(1,1,3,1,1)
+                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+            full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+            full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+            save_image(full_plot, vis_dir / f'a_train_{i}.png', nrow=t)
+
+        inputs = rearrange(test_batch['observations'], 'b t c h w -> (b t) c h w')
+        outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
+        b, t, _, _, _ = test_batch['observations'].size()
+        for i in tqdm(range(num_samples)):
+            test_obs = test_batch['observations'][i].cpu()
+            recon_obs = recons[i].cpu() # (t c h w)
+
+            full_plot = torch.cat([test_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
+            if try_slots:
+                color = colors[i].cpu()
+                mask = masks[i].cpu()
+                subimage = color * mask
+                mask = mask.repeat(1,1,3,1,1)
+                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+            full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+            full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+            save_image(full_plot, vis_dir / f'a_test_{i}.png', nrow=t)

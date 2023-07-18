@@ -18,7 +18,7 @@ from agent import Agent
 from collector import Collector
 from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
-from make_reconstructions import make_reconstructions_from_batch
+from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed
@@ -100,6 +100,12 @@ class VPTrainer:
         if cfg.common.resume:
             self.load_checkpoint()
 
+        try:
+            self.slot_based = cfg.common.slot_based
+            print("The model is slot-based")
+        except:
+            self.slot_based = False
+
     def run(self) -> None:
 
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
@@ -113,7 +119,7 @@ class VPTrainer:
                 #     to_log += self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config)
                 to_log += self.train_agent(epoch)
 
-            if self.cfg.evaluation.should and (epoch % self.cfg.evaluation.every == 0):
+            if (epoch % self.cfg.evaluation.every == 0):
                 # self.test_dataset.clear()
                 # to_log += self.test_collector.collect(self.agent, epoch, **self.cfg.collection.test.config)
                 to_log += self.eval_agent(epoch)
@@ -187,18 +193,21 @@ class VPTrainer:
         cfg_tokenizer = self.cfg.evaluation.tokenizer
         cfg_world_model = self.cfg.evaluation.world_model
 
-        if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=1)
+        # if epoch > cfg_tokenizer.start_after_epochs:
+        #     metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=1)
 
-        if epoch > cfg_world_model.start_after_epochs:
-            metrics_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer)
+        # if epoch > cfg_world_model.start_after_epochs:
+        #     metrics_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer)
 
-        # if epoch > cfg_actor_critic.start_after_epochs:
-        #     self.inspect_imagination(epoch)
+        # # if epoch > cfg_actor_critic.start_after_epochs:
+        # #     self.inspect_imagination(epoch)
 
         if cfg_tokenizer.save_reconstructions:
-            batch = self._to_device(self.test_dataset.sample_batch(batch_num_samples=3, sequence_length=self.cfg.common.sequence_length))
-            make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+            batch = self._to_device(self.train_dataset.sample_batch(batch_num_samples=4, sequence_length=self.cfg.common.sequence_length))
+            if self.slot_based:
+                make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+            else:
+                make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
 
         return [metrics_tokenizer, metrics_world_model]
 

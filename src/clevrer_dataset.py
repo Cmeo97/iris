@@ -301,7 +301,7 @@ class CLEVRERDataset(Dataset):
     def _collate_episodes_segments(self, episodes_segments: List[Dict]) -> Batch:
         batch = {}
         batch['observations'] = torch.stack([sampled_episode['observations'] for sampled_episode in episodes_segments])
-        batch['observations'] = batch['observations'].float() / 255.0  # int8 to float and scale
+        batch['observations'] = batch['observations'].float()  # int8 to float and scale
         return batch
 
     def sample_batch(self, batch_num_samples: int, sequence_length: int, weights: Optional[Tuple[float]] = None, sample_from_start: bool = True) -> Batch:
@@ -310,16 +310,24 @@ class CLEVRERDataset(Dataset):
     def _sample_episodes_segments(self, batch_num_samples: int, sequence_length: int, sample_from_start: bool) -> List[Dict]:
         sampled_episode_ids = np.random.choice(range(len(self.files)), size=batch_num_samples)
 
+        def pad(x):
+            pad_right = torch.nn.functional.pad(x, [0 for _ in range(2 * x.ndim - 1)] + [padding_length_right]) if padding_length_right > 0 else x
+            return torch.nn.functional.pad(pad_right, [0 for _ in range(2 * x.ndim - 2)] + [padding_length_left, 0]) if padding_length_left > 0 else pad_right
+
         sampled_episodes_segments = []
         for episode_idx in sampled_episode_ids:
             sampled_episode = self.__getitem__(episode_idx)
+            t = sampled_episode['observations'].shape[0]
             
             if sample_from_start:
-                start = random.randint(0, len(sampled_episode) - 1)
+                start = random.randint(0, t - 1)
                 stop = start + sequence_length
             else:
-                stop = random.randint(1, len(sampled_episode))
+                stop = random.randint(1, t)
                 start = stop - sequence_length
+
+            padding_length_right = max(0, stop - t)
+            padding_length_left = max(0, -start)
 
             # assert len(sampled_episodes_segments[-1]) == sequence_length
             sampled_episode['observations'] = sampled_episode['observations'][start:stop]
@@ -327,6 +335,13 @@ class CLEVRERDataset(Dataset):
                 sampled_episode['mask'] = sampled_episode['mask'][start:stop]
                 sampled_episode['pres_mask'] = sampled_episode['pres_mask'][start:stop]
                 sampled_episode['bbox'] = sampled_episode['bbox'][start:stop]
+
+            sampled_episode['observations'] = pad(sampled_episode['observations'])
+            if self.load_mask:
+                sampled_episode['mask'] = pad(sampled_episode['mask'])
+                sampled_episode['pres_mask'] = pad(sampled_episode['pres_mask'])
+                sampled_episode['bbox'] = pad(sampled_episode['bbox'])
+
             sampled_episodes_segments.append(sampled_episode)
         return sampled_episodes_segments
 
