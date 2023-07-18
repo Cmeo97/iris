@@ -35,6 +35,7 @@ class OCEncoderDecoderConfig:
     attn_resolutions: List[int]
     out_ch: int
     dropout: float
+    dec_input_dim: int # SBDecoder
     dec_hidden_dim: int # SBDecoder
 
 class Encoder(nn.Module):
@@ -594,7 +595,7 @@ class SpatialBroadcastDecoder(nn.Module):
 
         if hidden_dim == 64:
             self.layers = nn.Sequential(
-                nn.ConvTranspose2d(config.z_channels, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                nn.ConvTranspose2d(config.dec_input_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
@@ -608,7 +609,7 @@ class SpatialBroadcastDecoder(nn.Module):
             )
         elif hidden_dim == 32:
             self.layers = nn.Sequential(
-                nn.ConvTranspose2d(config.z_channels, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.ConvTranspose2d(config.dec_input_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
@@ -618,7 +619,7 @@ class SpatialBroadcastDecoder(nn.Module):
             )
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
-        self.pos_embedding = PositionalEmbedding(resolution, config.z_channels)
+        self.pos_embedding = PositionalEmbedding(resolution, config.dec_input_dim)
         self.resolution = resolution
         print('Decoder initialized')
 
@@ -713,44 +714,3 @@ class SlotAttention(nn.Module):
             slots = (slots + self.mlp(self.norm_pre_ff(slots)))
 
         return slots
-
-# class SlotAttention(nn.Module):
-#     def __init__(self, config) -> None:
-#         """Builds the Slot Attention-based auto-encoder.
-#         """
-#         super().__init__()
-#         self.config = config
-#         self.hidden_dim = config.hidden_dim
-#         self.resolution = config.resolution
-#         self.num_slots = config.num_slots
-#         self.iters = config.iters
-
-#         self.encoder_cnn = Encoder(config)
-
-#         self.fc = nn.Sequential(
-#             nn.Linear(config.hidden_dim, config.hidden_dim),
-#             nn.ReLU(inplace=True),
-#             nn.Linear(config.hidden_dim, config.hidden_dim),
-#         )
-
-#         self.slot_attention = SlotAttentionModule(
-#             num_slots=config.num_slots,
-#             dim=config.hidden_dim,
-#             iters=config.iters,
-#             eps=1e-8, 
-#             hidden_dim=128)
-        
-#     def forward(self, image):
-#         # `image` has shape: [batch_size, num_channels, width, height].
-
-#         # Convolutional encoder with position embedding.
-#         x = self.encoder_cnn(image)  # CNN Backbone.
-#         x = nn.LayerNorm(x.shape[1:]).to(x.device)(x)
-#         x = self.fc(x) # Feedforward network on set.
-#         # `x` has shape: [batch_size, width*height, input_size].
-
-#         # Slot Attention module.
-#         slots = self.slot_attention(x)
-#         # `slots` has shape: [batch_size, num_slots, slot_size].
-
-#         return slots
