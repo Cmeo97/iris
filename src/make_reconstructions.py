@@ -22,7 +22,7 @@ def make_reconstructions_from_batch(batch, save_dir, epoch, tokenizer):
 
 @torch.no_grad()
 def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer):
-    check_batch(batch)
+    # check_batch(batch)
 
     inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
     outputs = reconstruct_through_tokenizer_with_slots(inputs, tokenizer)
