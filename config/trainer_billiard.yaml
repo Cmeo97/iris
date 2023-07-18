@@ -20,6 +20,11 @@ initialization:
   load_tokenizer: False
   load_world_model: False
   load_actor_critic: False
+# initialization:
+#   path_to_checkpoint: checkpoints/epoch.pt
+#   load_tokenizer: False
+#   load_world_model: False
+#   load_actor_critic: False
 
 common:
   epochs: 600

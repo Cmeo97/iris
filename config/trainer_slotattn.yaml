@@ -20,6 +20,11 @@ initialization:
   load_tokenizer: False
   load_world_model: False
   load_actor_critic: False
+# initialization:
+#   path_to_checkpoint: checkpoints/epoch.pt
+#   load_tokenizer: False
+#   load_world_model: False
+#   load_actor_critic: False
 
 common:
   epochs: 600
@@ -28,6 +33,7 @@ common:
   seed: 0
   sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
+  slot_based: True
 
 collection:
   train:
@@ -65,13 +71,13 @@ training:
     grad_acc_steps: 4
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 25
+    start_after_epochs: 250
     steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 4
     grad_acc_steps: 16
     max_grad_norm: 10.0
-    start_after_epochs: 50
+    start_after_epochs: 500
     steps_per_epoch: 200
     imagine_horizon: ${common.sequence_length}
     burn_in: 20

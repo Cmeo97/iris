@@ -1,14 +1,14 @@
 defaults:
   - _self_
-  - tokenizer: slot_attn
-  - world_model: slot_attn
+  - tokenizer: default
+  - world_model: default
   - actor_critic: default
-  - env: billiards
+  - env: default
   - datasets: default
 
 wandb:
   mode: online
-  project: IRIS-billiard_env
+  project: IRIS
   entity: null
   name: null
   group: null
@@ -28,7 +28,6 @@ common:
   seed: 0
   sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
-  slot_based: True
 
 collection:
   train:
@@ -69,8 +68,8 @@ training:
     start_after_epochs: 25
     steps_per_epoch: 200
   actor_critic:
-    batch_num_samples: 4
-    grad_acc_steps: 16
+    batch_num_samples: 16
+    grad_acc_steps: 4
     max_grad_norm: 10.0
     start_after_epochs: 50
     steps_per_epoch: 200
