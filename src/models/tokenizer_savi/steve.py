@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from steve.transformer import TransformerEncoder, TransformerDecoder
+from steve.transformer import TransformerEncoder, TransformerDecoder #TODO: use transformer defined in transformer.py?
 
 def gumbel_softmax(logits, tau=1., hard=False, dim=-1):
 
@@ -62,6 +62,19 @@ class Conv2dBlock(nn.Module):
     def forward(self, x):
         x = self.m(x)
         return F.relu(x)
+    
+def gru_cell(input_size, hidden_size, bias=True):
+    
+    m = nn.GRUCell(input_size, hidden_size, bias)
+    
+    nn.init.xavier_uniform_(m.weight_ih)
+    nn.init.orthogonal_(m.weight_hh)
+    
+    if bias:
+        nn.init.zeros_(m.bias_ih)
+        nn.init.zeros_(m.bias_hh)
+    
+    return m
 
 class dVAE(nn.Module):
     
