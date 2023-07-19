@@ -9,9 +9,10 @@ import torch.nn.functional as F
 from dataset import Batch
 from .kv_caching import KeysValues
 from .slicer import Embedder, Head
-from .tokenizer import Tokenizer
 from .transformer import Transformer, TransformerConfig
 from utils import init_weights, LossWithIntermediateLosses
+from .tokenizer_savi.steve import STEVE, SteveConfig
+from .tokenizer import Tokenizer
 
 
 @dataclass
@@ -23,12 +24,12 @@ class WorldModelOutput:
 
 
 class WorldModel(nn.Module):
-    def __init__(self, obs_vocab_size: int, act_vocab_size: int, config: TransformerConfig) -> None:
+    def __init__(self, tokenizer_type: str, obs_vocab_size: int, act_vocab_size: int, config: TransformerConfig, config_steve: SteveConfig) -> None:
         super().__init__()
         self.obs_vocab_size, self.act_vocab_size = obs_vocab_size, act_vocab_size
         self.config = config
         self.transformer = Transformer(config)
-
+     
         all_but_last_obs_tokens_pattern = torch.ones(config.tokens_per_block)
         all_but_last_obs_tokens_pattern[-2] = 0
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
@@ -73,6 +74,8 @@ class WorldModel(nn.Module):
             )
         )
 
+        self.steve = STEVE(config_steve)
+
         self.apply(init_weights)
 
     def __repr__(self) -> str:
@@ -97,17 +100,26 @@ class WorldModel(nn.Module):
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
 
         with torch.no_grad():
-            obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
+            out_enc_dvae = tokenizer.encode(batch['observations'], should_preprocess=True)  # (BL, K)
+            z_hard, obs_tokens = out_enc_dvae.z_quantized, out_enc_dvae.tokens
 
+        B, T, _, _, _ = batch['observations'].shape
         act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
         tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
 
         outputs = self(tokens)
 
+        ## STEVE 
+        pred, attns = self.steve(batch['observations'], z_hard)
+
         labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
-        logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
-        loss_obs = F.cross_entropy(logits_observations, labels_observations)
+        #logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
+
+
+
+        loss_obs = -(z_hard * torch.log_softmax(pred, dim=-1)).sum() / (B * T)
+        #loss_obs = F.cross_entropy(logits_observations, labels_observations)
         loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
         loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 

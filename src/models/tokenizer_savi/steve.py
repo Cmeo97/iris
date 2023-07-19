@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from dataclasses import dataclass
 from steve.transformer import TransformerEncoder, TransformerDecoder #TODO: use transformer defined in transformer.py?
 
 def gumbel_softmax(logits, tau=1., hard=False, dim=-1):
@@ -16,7 +16,7 @@ def gumbel_softmax(logits, tau=1., hard=False, dim=-1):
     if hard:
         index = y_soft.argmax(dim, keepdim=True)
         y_hard = torch.zeros_like(logits).scatter_(dim, index, 1.)
-        return y_hard - y_soft.detach() + y_soft
+        return y_hard - y_soft.detach() + y_soft, index
     else:
         return y_soft
 
@@ -108,10 +108,10 @@ class dVAE(nn.Module):
         )
 
     def forward(self, x, tau, hard):
-        z_logits = F.log_softmax(self.dvae.encoder(x), dim=1)                           # B * T, vocab_size, H_enc, W_enc
+        z_logits = F.log_softmax(self.encoder(x), dim=1)                           # B * T, vocab_size, H_enc, W_enc
         z_soft = gumbel_softmax(z_logits, tau, hard, dim=1)                             # B * T, vocab_size, H_enc, W_enc
-        z_hard = gumbel_softmax(z_logits, tau, True, dim=1).detach()                    # B * T, vocab_size, H_enc, W_enc
-        return z_soft, z_hard
+        z_hard, index = gumbel_softmax(z_logits, tau, True, dim=1).detach()                    # B * T, vocab_size, H_enc, W_enc
+        return z_soft, z_hard, index
 
 
 class STEVEEncoder(nn.Module):
@@ -334,3 +334,169 @@ class OneHotDictionary(nn.Module):
         tokens = torch.argmax(x, dim=-1)  # batch_size x N
         token_embs = self.dictionary(tokens)  # batch_size x N x emb_size
         return token_embs
+    
+
+@dataclass
+class SteveConfig:
+    num_iterations: int = 2
+    num_slots: int = 15
+    cnn_hidden_size: int = 64
+    slot_size: int = 192
+    mlp_hidden_size: int = 192
+    img_channels: int = 3
+    image_size: int = 128
+    vocab_size: int = 4096
+    d_model: int = 192
+    dropout: float = 0.1
+    num_decoder_blocks: int = 8
+    num_decoder_heads: int = 4
+    num_predictor_blocks: int = 1
+    num_predictor_heads: int = 4 
+    predictor_dropout: float = 0.0
+
+
+class STEVE(nn.Module):
+    
+    def __init__(self, config: SteveConfig):
+        super().__init__()
+        
+        self.num_iterations = config.num_iterations
+        self.num_slots = config.num_slots
+        self.cnn_hidden_size = config.cnn_hidden_size
+        self.slot_size = config.slot_size
+        self.mlp_hidden_size = config.mlp_hidden_size
+        self.img_channels = config.img_channels
+        self.image_size = config.image_size
+        self.vocab_size = config.vocab_size
+        self.d_model = config.d_model
+        self.dropout = config.dropout
+        self.num_decoder_blocks = config.num_decoder_blocks
+        self.num_decoder_heads = config.num_decoder_heads
+        self.num_predictor_blocks = config.num_predictor_blocks
+        self.num_predictor_heads = config.num_predictor_heads
+        self.predictor_dropout = config.predictor_dropout
+
+        # encoder networks
+        self.steve_encoder = STEVEEncoder(self.img_channels,
+                                    self.cnn_hidden_size,
+                                    self.image_size,
+                                    self.d_model,
+                                    self.num_iterations,
+                                    self.num_slots,
+                                    self.slot_size,
+                                    self.mlp_hidden_size,
+                                    self.num_predictor_blocks,
+                                    self.num_predictor_heads,
+                                    self.predictor_dropout)
+
+        # decoder networks
+        self.steve_decoder = STEVEDecoder(self.d_model,
+                                    self.image_size,
+                                    self.num_decoder_blocks,
+                                    self.num_decoder_heads,
+                                    self.dropout)
+
+    def forward(self, video, z_hard):
+        B, T, C, H, W = video.shape
+
+        video_flat = video.flatten(end_dim=1)                               # B * T, C, H, W
+
+        # dvae encode
+        #z_logits = F.log_softmax(self.dvae.encoder(video_flat), dim=1)       # B * T, vocab_size, H_enc, W_enc
+        #z_soft = gumbel_softmax(z_logits, tau, hard, dim=1)                  # B * T, vocab_size, H_enc, W_enc
+        #z_hard = gumbel_softmax(z_logits, tau, True, dim=1).detach()         # B * T, vocab_size, H_enc, W_enc
+        #z_hard = z_hard.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)                         # B * T, H_enc * W_enc, vocab_size
+        z_emb = self.steve_decoder.dict(z_hard)                                                     # B * T, H_enc * W_enc, d_model
+        z_emb = torch.cat([self.steve_decoder.bos.expand(B * T, -1, -1), z_emb], dim=1)             # B * T, 1 + H_enc * W_enc, d_model
+        z_emb = self.steve_decoder.pos(z_emb)                                                       # B * T, 1 + H_enc * W_enc, d_model
+                   
+
+        # savi
+        emb = self.steve_encoder.cnn(video_flat)      # B * T, cnn_hidden_size, H, W
+        emb = self.steve_encoder.pos(emb)             # B * T, cnn_hidden_size, H, W
+        H_enc, W_enc = emb.shape[-2:]
+
+        emb_set = emb.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)                                   # B * T, H * W, cnn_hidden_size
+        emb_set = self.steve_encoder.mlp(self.steve_encoder.layer_norm(emb_set))                            # B * T, H * W, cnn_hidden_size
+        emb_set = emb_set.reshape(B, T, H_enc * W_enc, self.d_model)                                                # B, T, H * W, cnn_hidden_size
+
+        slots, attns = self.steve_encoder.savi(emb_set)         # slots: B, T, num_slots, slot_size
+                                                                # attns: B, T, num_slots, num_inputs
+
+        attns = attns\
+            .transpose(-1, -2)\
+            .reshape(B, T, self.num_slots, 1, H_enc, W_enc)\
+            .repeat_interleave(H // H_enc, dim=-2)\
+            .repeat_interleave(W // W_enc, dim=-1)          # B, T, num_slots, 1, H, W
+        attns = video.unsqueeze(2) * attns + (1. - attns)                               # B, T, num_slots, C, H, W
+
+        # decode
+        slots = self.steve_encoder.slot_proj(slots)                                                         # B, T, num_slots, d_model
+        pred = self.steve_decoder.tf(z_emb[:, :-1], slots.flatten(end_dim=1))                               # B * T, H_enc * W_enc, d_model
+        pred = self.steve_decoder.head(pred)                                                                # B * T, H_enc * W_enc, vocab_size
+        #cross_entropy = -(z_hard * torch.log_softmax(pred, dim=-1)).sum() / (B * T)                         # 1
+
+        return (pred, attns)
+
+    def encode(self, video):
+        B, T, C, H, W = video.size()
+
+        video_flat = video.flatten(end_dim=1)
+
+        # savi
+        emb = self.steve_encoder.cnn(video_flat)      # B * T, cnn_hidden_size, H, W
+        emb = self.steve_encoder.pos(emb)             # B * T, cnn_hidden_size, H, W
+        H_enc, W_enc = emb.shape[-2:]
+
+        emb_set = emb.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)                                   # B * T, H * W, cnn_hidden_size
+        emb_set = self.steve_encoder.mlp(self.steve_encoder.layer_norm(emb_set))                            # B * T, H * W, cnn_hidden_size
+        emb_set = emb_set.reshape(B, T, H_enc * W_enc, self.d_model)                                                # B, T, H * W, cnn_hidden_size
+
+        slots, attns = self.steve_encoder.savi(emb_set)     # slots: B, T, num_slots, slot_size
+                                                            # attns: B, T, num_slots, num_inputs
+
+        attns = attns \
+            .transpose(-1, -2) \
+            .reshape(B, T, self.num_slots, 1, H_enc, W_enc) \
+            .repeat_interleave(H // H_enc, dim=-2) \
+            .repeat_interleave(W // W_enc, dim=-1)                      # B, T, num_slots, 1, H, W
+
+        attns_vis = video.unsqueeze(2) * attns + (1. - attns)           # B, T, num_slots, C, H, W
+
+        return slots, attns_vis, attns
+
+    def decode(self, slots):
+        B, num_slots, slot_size = slots.size()
+        H_enc, W_enc = (self.image_size // 4), (self.image_size // 4)
+        gen_len = H_enc * W_enc
+
+        slots = self.steve_encoder.slot_proj(slots)
+
+        # generate image tokens auto-regressively
+        z_gen = slots.new_zeros(0)
+        input = self.steve_decoder.bos.expand(B, 1, -1)
+        for t in range(gen_len):
+            decoder_output = self.steve_decoder.tf(
+                self.steve_decoder.pos(input),
+                slots
+            )
+            z_next = F.one_hot(self.steve_decoder.head(decoder_output)[:, -1:].argmax(dim=-1), self.vocab_size)
+            z_gen = torch.cat((z_gen, z_next), dim=1)
+            input = torch.cat((input, self.steve_decoder.dict(z_next)), dim=1)
+
+        z_gen = z_gen.transpose(1, 2).float().reshape(B, -1, H_enc, W_enc)
+        gen_transformer = self.dvae.decoder(z_gen)
+
+        return gen_transformer.clamp(0., 1.)
+
+    def reconstruct_autoregressive(self, video):
+        """
+        image: batch_size x img_channels x H x W
+        """
+        B, T, C, H, W = video.size()
+        slots, attns, _ = self.encode(video)
+        recon_transformer = self.decode(slots.flatten(end_dim=1))
+        recon_transformer = recon_transformer.reshape(B, T, C, H, W)
+
+        return recon_transformer
+

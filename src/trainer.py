@@ -80,7 +80,7 @@ class Trainer:
         env = train_env if self.cfg.training.should else test_env
 
         tokenizer = instantiate(cfg.tokenizer)
-        world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
+        world_model = WorldModel(tokenizer_type=tokenizer.type, obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
         actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions)
         self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
@@ -154,13 +154,15 @@ class Trainer:
         loss_total_epoch = 0.0
         intermediate_losses = defaultdict(float)
 
-        for _ in tqdm(range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout):
+
+        for step in tqdm(range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout):
             optimizer.zero_grad()
+
             for _ in range(grad_acc_steps):
                 batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sampling_weights, sample_from_start)
                 batch = self._to_device(batch)
-
-                losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
+                global_step = epoch*steps_per_epoch + step
+                losses = component.compute_loss(batch, global_step, **kwargs_loss) / grad_acc_steps
                 loss_total_step = losses.loss_total
                 loss_total_step.backward()
                 loss_total_epoch += loss_total_step.item() / steps_per_epoch
