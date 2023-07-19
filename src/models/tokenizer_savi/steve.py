@@ -1,6 +1,67 @@
-from steve.utils import *
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from steve.transformer import TransformerEncoder, TransformerDecoder
 
+def gumbel_softmax(logits, tau=1., hard=False, dim=-1):
+
+    eps = torch.finfo(logits.dtype).tiny
+
+    gumbels = -(torch.empty_like(logits).exponential_() + eps).log()
+    gumbels = (logits + gumbels) / tau
+
+    y_soft = F.softmax(gumbels, dim)
+
+    if hard:
+        index = y_soft.argmax(dim, keepdim=True)
+        y_hard = torch.zeros_like(logits).scatter_(dim, index, 1.)
+        return y_hard - y_soft.detach() + y_soft
+    else:
+        return y_soft
+
+def linear(in_features, out_features, bias=True, weight_init='xavier', gain=1.):
+    
+    m = nn.Linear(in_features, out_features, bias)
+    
+    if weight_init == 'kaiming':
+        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+    else:
+        nn.init.xavier_uniform_(m.weight, gain)
+    
+    if bias:
+        nn.init.zeros_(m.bias)
+    
+    return m
+
+def conv2d(in_channels, out_channels, kernel_size, stride=1, padding=0,
+           dilation=1, groups=1, bias=True, padding_mode='zeros',
+           weight_init='xavier'):
+    
+    m = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding,
+                  dilation, groups, bias, padding_mode)
+    
+    if weight_init == 'kaiming':
+        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+    else:
+        nn.init.xavier_uniform_(m.weight)
+    
+    if bias:
+        nn.init.zeros_(m.bias)
+    
+    return m
+
+class Conv2dBlock(nn.Module):
+    
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super().__init__()
+        
+        self.m = conv2d(in_channels, out_channels, kernel_size, stride, padding,
+                        bias=True, weight_init='kaiming')
+    
+    def forward(self, x):
+        x = self.m(x)
+        return F.relu(x)
 
 class dVAE(nn.Module):
     
@@ -32,6 +93,12 @@ class dVAE(nn.Module):
             nn.PixelShuffle(2),
             conv2d(64, img_channels, 1),
         )
+
+    def forward(self, x, tau, hard):
+        z_logits = F.log_softmax(self.dvae.encoder(x), dim=1)                           # B * T, vocab_size, H_enc, W_enc
+        z_soft = gumbel_softmax(z_logits, tau, hard, dim=1)                             # B * T, vocab_size, H_enc, W_enc
+        z_hard = gumbel_softmax(z_logits, tau, True, dim=1).detach()                    # B * T, vocab_size, H_enc, W_enc
+        return z_soft, z_hard
 
 
 class STEVEEncoder(nn.Module):
@@ -71,6 +138,14 @@ class STEVEEncoder(nn.Module):
             num_predictor_blocks, num_predictor_heads, predictor_dropout)
 
         self.slot_proj = linear(slot_size, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        conv_output = self.cnn(x)                # B * T, cnn_hidden_size, H, W
+        out = self.pos(out)                      # B * T, cnn_hidden_size, H, W
+        out = out.flatten(2, 3).permute(0, 2, 1) # B * T, H * W, cnn_hidden_size
+        out = self.mlp(self.layer_norm(out))     # B * T, H * W, cnn_hidden_size
+        out = out.reshape(conv_output.shape)
+        return out
 
 class STEVEDecoder(nn.Module):
     def __init__(self, 

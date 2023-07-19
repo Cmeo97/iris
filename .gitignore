@@ -136,3 +136,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 .nfs*
+
+clevr_robot_env/
+data/
