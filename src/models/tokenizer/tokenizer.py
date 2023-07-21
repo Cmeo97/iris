@@ -151,10 +151,10 @@ class OCTokenizer(nn.Module):
         shape = x.shape  # (..., C, H, W)
         x = x.view(-1, *shape[-3:])
         z = self.encoder(x)
-        if self.pre_quant_conv is not None:
-            z = self.pre_quant_conv(z)
-        b, e, h, w = z.shape
-        z_flattened = rearrange(z, 'b e h w -> b (h w) e')
+        # if self.pre_quant_conv is not None:
+        #     z = self.pre_quant_conv(z)
+        b, e, c = z.shape
+        z_flattened = rearrange(z, 'b e c -> b c e')
         z = self.slot_attn(z_flattened)
         z = rearrange(z, 'b k (t e) -> (b k t) e', t=self.tokens_per_slot)
 

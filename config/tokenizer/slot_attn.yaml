@@ -8,14 +8,14 @@ encoder:
     _target_: models.tokenizer.OCEncoderDecoderConfig
     resolution: 64
     in_channels: 3
-    z_channels: 32
+    z_channels: 32 # need to match embed_dim if no pre_process_conv
     ch: 64
     ch_mult: [1, 1, 1, 1, 1]
     num_res_blocks: 2
     attn_resolutions: [8, 16]
     out_ch: 4
     dropout: 0.0
-    dec_input_dim: 64 # need to match embed_dim if no pre/post_process_conv
+    dec_input_dim: 64 # need to match embed_dim if no post_process_conv
     dec_hidden_dim: 32
 decoder:
   _target_: models.tokenizer.SpatialBroadcastDecoder
@@ -24,7 +24,7 @@ slot_attn:
   _target_: models.tokenizer.SlotAttention
   config:
     _target_: models.tokenizer.SAConfig
-    num_slots: 4 # num_tokens = num_slots * tokens_per_slot
+    num_slots: 8 # num_tokens = num_slots * tokens_per_slot
     tokens_per_slot: 1
     iters: 3
     channels_enc: 32

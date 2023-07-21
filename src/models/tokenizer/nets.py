@@ -583,7 +583,6 @@ class SAEncoder(nn.Module):
         out = out.flatten(2, 3) # bs x c x (w * h)
         out = self.lnorm(out)
         out = self.conv_1x1(out)
-        out = conv_output.reshape(conv_output.shape) # bs x c x w x h
         return out
     
 class SpatialBroadcastDecoder(nn.Module):
