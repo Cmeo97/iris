@@ -576,6 +576,16 @@ class SAEncoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv1d(config.z_channels, config.z_channels, kernel_size=1),
         )
+        self._init_params()
+
+    def _init_params(self):
+        for name, tensor in self.named_parameters():
+            if name.endswith(".bias"):
+                nn.init.zeros_(tensor)
+            elif len(tensor.shape) <= 1:
+                pass  # silent
+            else:
+                nn.init.xavier_uniform_(tensor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         conv_output = self.conv_bone(x)
@@ -596,8 +606,8 @@ class SpatialBroadcastDecoder(nn.Module):
             self.layers = nn.Sequential(
                 nn.ConvTranspose2d(config.dec_input_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
-                nn.ReLU(inplace=True),
+                # nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
+                # nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(2, 2), padding=2, output_padding=1),
@@ -608,32 +618,47 @@ class SpatialBroadcastDecoder(nn.Module):
             )
         elif hidden_dim == 32:
             self.layers = nn.Sequential(
-                nn.ConvTranspose2d(config.dec_input_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                # nn.ConvTranspose2d(config.dec_input_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.Conv2d(config.dec_input_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                # nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.Conv2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                # nn.ConvTranspose2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
+                nn.Conv2d(hidden_dim, hidden_dim, 5, stride=(1, 1), padding=2),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(hidden_dim, config.out_ch, 3, stride=(1, 1), padding=1),
+                # nn.ConvTranspose2d(hidden_dim, config.out_ch, 3, stride=(1, 1), padding=1),
+                nn.Conv2d(hidden_dim, config.out_ch, 3, stride=(1, 1), padding=1),
             )
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
-        self.pos_embedding = PositionalEmbedding(resolution, config.dec_input_dim)
+        self.init_resolution = resolution if hidden_dim == 32 else (8, 8)
+        self.pos_embedding = PositionalEmbedding(self.init_resolution, config.dec_input_dim)
         self.resolution = resolution
+        self._init_params()
         print('Decoder initialized')
 
+    def _init_params(self):
+        for name, tensor in self.named_parameters():
+            if name.endswith(".bias"):
+                nn.init.zeros_(tensor)
+            elif len(tensor.shape) <= 1:
+                pass  # silent
+            else:
+                nn.init.xavier_uniform_(tensor)
+
     def forward(self, x: torch.Tensor, return_indiv_slots=False) -> torch.Tensor:
+        bs = x.shape[0]
+        K = x.shape[2] * x.shape[3]
         x = self.spatial_broadcast(x.permute(0,2,3,1))
-        bs, K, nts, td, w, h = x.shape #K: num slots, nts: num tokens per slots, td: token_dim
-        x = self.pos_embedding(x.reshape(-1, td, w, h))
+        x = self.pos_embedding(x)
         x = self.layers(x)
 
         # Undo combination of slot and batch dimension; split alpha masks.
         colors, masks = x[:, :3], x[:, -1:]
-        colors = colors.reshape(bs, -1, 3, self.resolution[0], self.resolution[1])
-        masks = masks.reshape(bs, K, -1, 1, self.resolution[0], self.resolution[1])
+        colors = colors.reshape(bs, K, 3, self.resolution[0], self.resolution[1])
+        masks = masks.reshape(bs, K, 1, self.resolution[0], self.resolution[1])
         masks = masks.softmax(dim=1)
-        masks = masks.reshape(bs, -1, 1, self.resolution[0],  self.resolution[1])
         rec = (colors * masks).sum(dim=1)
 
         if return_indiv_slots:
@@ -642,8 +667,9 @@ class SpatialBroadcastDecoder(nn.Module):
         return rec
 
     def spatial_broadcast(self, slot: torch.Tensor) -> torch.Tensor:
+        slot = slot.reshape(-1, slot.shape[-1])
         slot = slot.unsqueeze(-1).unsqueeze(-1)
-        return slot.repeat(1, 1, 1, 1, self.resolution[0], self.resolution[1])
+        return slot.repeat(1, 1, self.init_resolution[0], self.init_resolution[1])
 
 class SlotAttention(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
@@ -680,6 +706,20 @@ class SlotAttention(nn.Module):
         self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
         self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
         self.slot_dim = config.slot_dim
+        
+        self._init_params()
+
+    def _init_params(self):
+        for name, tensor in self.named_parameters():
+            if name.endswith(".bias"):
+                torch.nn.init.zeros_(tensor)
+            elif len(tensor.shape) <= 1:
+                pass  # silent
+            else:
+                nn.init.xavier_uniform_(tensor)
+        torch.nn.init.zeros_(self.gru.bias_ih)
+        torch.nn.init.zeros_(self.gru.bias_hh)
+        torch.nn.init.orthogonal_(self.gru.weight_hh)
 
     def forward(self, inputs: torch.Tensor, num_slots: Optional[int] = None) -> torch.Tensor:
         b, n, d = inputs.shape

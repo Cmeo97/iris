@@ -125,8 +125,7 @@ class OCTokenizer(nn.Module):
 
     def forward(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> Tuple[torch.Tensor]:
         outputs = self.encode(x, should_preprocess)
-        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
-        reconstructions = self.decode(decoder_input, should_postprocess)
+        reconstructions = self.decode(outputs.z_quantized, should_postprocess)
         return outputs.z, outputs.z_quantized, reconstructions
 
     def compute_loss(self, batch: Batch, **kwargs: Any) -> LossWithIntermediateLosses:
@@ -134,16 +133,7 @@ class OCTokenizer(nn.Module):
         observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
         z, z_quantized, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
 
-        # Codebook loss. Notes:
-        # - beta position is different from taming and identical to original VQVAE paper
-        # - VQVAE uses 0.25 by default
-        beta = 1.0
-        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + beta * (z - z_quantized.detach()).pow(2).mean()
-
-        reconstruction_loss = torch.abs(observations - reconstructions).mean()
-        perceptual_loss = torch.mean(self.lpips(observations, reconstructions))
-
-        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss, perceptual_loss=perceptual_loss)
+        return LossWithIntermediateLosses(reconstruction_loss=torch.pow(observations - reconstructions, 2).mean())
 
     def encode(self, x: torch.Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
         if should_preprocess:
@@ -161,8 +151,8 @@ class OCTokenizer(nn.Module):
         dist_to_embeddings = torch.sum(z ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z, self.embedding.weight.t())
 
         tokens = dist_to_embeddings.argmin(dim=-1)
-        z_q = rearrange(self.embedding(tokens), '(b k t) d -> b d k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
-        # z_q = rearrange(z, '(b k t) d -> b d k t', b=b, k=self.num_slots, t=self.tokens_per_slot).clone() # to skip quantization
+        # z_q = rearrange(self.embedding(tokens), '(b k t) d -> b d k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
+        z_q = rearrange(z, '(b k t) d -> b d k t', b=b, k=self.num_slots, t=self.tokens_per_slot) # to skip quantization
 
         # Reshape to original
         z = z.reshape(*shape[:-3], *z_q.shape[1:])
