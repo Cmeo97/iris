@@ -70,8 +70,8 @@ training:
     start_after_epochs: 250
     steps_per_epoch: 200
   actor_critic:
-    batch_num_samples: 4
-    grad_acc_steps: 16
+    batch_num_samples: 16
+    grad_acc_steps: 4
     max_grad_norm: 10.0
     start_after_epochs: 300
     steps_per_epoch: 200

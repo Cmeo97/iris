@@ -1,5 +1,5 @@
 _target_: models.TransformerConfig
-tokens_per_block: 9
+tokens_per_block: 5 # need to match (#tokens + action_dim)
 max_blocks: 20
 attention: 'causal'
 num_layers: 10
