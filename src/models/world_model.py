@@ -118,7 +118,7 @@ class WorldModel(nn.Module):
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
 
         with torch.no_grad():
-            obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
+            obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (B, L, K)
 
         if self.act_vocab_size == 0:
             tokens = rearrange(obs_tokens, 'b l k -> b (l k)')
