@@ -688,6 +688,11 @@ class SlotAttention(nn.Module):
             limit = sqrt(6.0 / (1 + config.slot_dim))
             torch.nn.init.uniform_(self.slots_mu, -limit, limit)
             torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
+        # self.slots_mu = nn.Linear(config.channels_enc, config.slot_dim)
+        # self.slots_log_sigma = nn.Linear(config.channels_enc, config.slot_dim)
+        # self.slots_mu2 = nn.Linear(4096, config.num_slots)
+        # self.slots_log_sigma2 = nn.Linear(4096, config.num_slots)
+
         self.to_q = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
         self.to_k = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
         self.to_v = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
@@ -728,6 +733,10 @@ class SlotAttention(nn.Module):
 
         mu = self.slots_mu.expand(b, num_slots, -1)
         sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
+        # mu = self.slots_mu(inputs)
+        # sigma = self.slots_log_sigma(inputs)
+        # mu = self.slots_mu2(mu.permute(0, 2, 1)).permute(0, 2, 1)
+        # sigma = self.slots_log_sigma2(sigma.permute(0, 2, 1)).permute(0, 2, 1).exp()
         slots = torch.normal(mu, sigma)
 
         inputs = self.norm_input(inputs)

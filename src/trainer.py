@@ -42,6 +42,12 @@ class Trainer:
         self.start_epoch = 1
         self.device = torch.device(cfg.common.device)
 
+        try:
+            self.slot_based = cfg.common.slot_based
+            print("The model is slot-based")
+        except:
+            self.slot_based = False
+
         self.ckpt_dir = Path('checkpoints')
         self.media_dir = Path('media')
         self.episode_dir = self.media_dir / 'episodes'
@@ -106,12 +112,6 @@ class Trainer:
         if cfg.common.resume:
             self.load_checkpoint()
 
-        try:
-            self.slot_based = cfg.common.slot_based
-            print("The model is slot-based")
-        except:
-            self.slot_based = False
-    
     def run(self) -> None:
 
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
@@ -136,6 +136,12 @@ class Trainer:
             to_log.append({'duration': (time.time() - start_time) / 3600})
             for metrics in to_log:
                 wandb.log({'epoch': epoch, **metrics})
+
+            if self.slot_based:
+                # self.agent.tokenizer.quantizer.plot_count(epoch, self.reconstructions_dir) # for debugging
+                # self.agent.tokenizer.quantizer.plot_slot_dist(epoch, self.reconstructions_dir) # for debugging
+                # self.agent.tokenizer.quantizer.plot_codebook(epoch, self.reconstructions_dir) # for debugging
+                self.agent.tokenizer.set_tau()
 
         self.finish()
 
