@@ -76,7 +76,10 @@ class WorldModelEnv:
                 done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
 
             if k < self.num_observations_tokens:
-                token = Categorical(logits=outputs_wm.logits_observations).sample()
+                if self.tokenizer.slot_based:
+                    token = torch.argmax(outputs_wm.logits_observations, dim=-1)
+                else:
+                    token = Categorical(logits=outputs_wm.logits_observations).sample()
                 obs_tokens.append(token)
 
         output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
@@ -94,7 +97,7 @@ class WorldModelEnv:
     @torch.no_grad()
     def decode_obs_tokens(self) -> List[Image.Image]:
         if self.tokenizer.slot_based:
-            embedded_tokens = self.tokenizer.quantizer.decode_tokens(self.obs_tokens)     # (B, K, E)
+            embedded_tokens = self.tokenizer.decode_tokens(self.obs_tokens)     # (B, K, E)
             z = rearrange(embedded_tokens, 'b (k t) e -> b e k t', k=self.tokenizer.num_slots, t=self.tokenizer.tokens_per_slot)
         else:
             embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)

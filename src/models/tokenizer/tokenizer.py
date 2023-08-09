@@ -334,6 +334,16 @@ class OCTokenizerSeparate(OCTokenizer):
         z_q = self.encode(x, should_preprocess).z_quantized #TODO: z_quantized or z?
         return self.decode_slots(z_q, should_postprocess)
 
+    def decode_logits(self, logits):
+        z_soft = self.quantizer.gumbel_softmax(logits, self.tau, False, dim=1)
+        z_q = self.quantizer.post_vq_linear(z_soft)
+        return z_q
+    
+    def decode_tokens(self, tokens):
+        z_hard = F.one_hot(tokens, num_classes=self.vocab_size).float()
+        z_q = self.quantizer.post_vq_linear(z_hard)
+        return z_q
+
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
         """x is supposed to be channels first and in [0, 1]"""
         return x.mul(2).sub(1)

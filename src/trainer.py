@@ -22,7 +22,7 @@ from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
 from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch
 from models.actor_critic import ActorCritic
-from models.world_model import WorldModel
+from models.world_model import WorldModel, OCWorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed, linear_warmup_exp_decay
 
 
@@ -88,7 +88,10 @@ class Trainer:
         env = train_env if self.cfg.training.should else test_env
 
         tokenizer = instantiate(cfg.tokenizer)
-        world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
+        if self.slot_based:
+            world_model = OCWorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
+        else:
+            world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
         actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions)
         self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')

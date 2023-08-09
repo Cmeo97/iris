@@ -93,11 +93,6 @@ class dVAE(nn.Module):
         self.slot_targ = z.detach()
         self.slot_repr = z_q.detach()
         return tokens, z_q
-    
-    def decode_tokens(self, tokens):
-        z_hard = F.one_hot(tokens, num_classes=self.vocab_size).float()
-        z_q = self.post_vq_linear(z_hard)
-        return z_q
 
     def plot_count(self, epoch, save_dir):
         pass

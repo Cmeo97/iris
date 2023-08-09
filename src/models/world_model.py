@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+import math
 
 from einops import rearrange
 import torch
@@ -146,3 +147,84 @@ class WorldModel(nn.Module):
         labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
         labels_ends = ends.masked_fill(mask_fill, -100)
         return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)
+
+class PositionalEmbedding(nn.Module):
+    def __init__(self, max_len, embed_dim):
+        super().__init__()
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, embed_dim).float()
+        pe.require_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, embed_dim, 2).float() * -(math.log(10000.0) / embed_dim)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x.unsqueeze(0)
+        return self.pe[:, :x.size(1)].squeeze(0)
+
+
+class OCWorldModel(WorldModel):
+    def __init__(self, obs_vocab_size: int, act_vocab_size: int, config: TransformerConfig) -> None:
+        super().__init__(obs_vocab_size, act_vocab_size, config)
+
+        self.tokens_per_block = config.tokens_per_block
+        self.max_blocks = config.max_blocks
+        self.spatial_pos_emb = PositionalEmbedding(config.tokens_per_block, config.embed_dim)
+        # self.temporal_pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
+
+    def forward(self, tokens: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
+
+        num_steps = tokens.size(1)  # (B, T)
+        assert num_steps <= self.config.max_tokens
+        prev_steps = 0 if past_keys_values is None else past_keys_values.size
+
+        spatial_emb = self.spatial_pos_emb(torch.arange(self.tokens_per_block, device=tokens.device)).repeat(self.max_blocks, 1)[:num_steps]
+        sequences = self.embedder(tokens, num_steps, prev_steps) + self.pos_emb(prev_steps + torch.arange(num_steps, device=tokens.device)) + spatial_emb
+
+        x = self.transformer(sequences, past_keys_values)
+
+        logits_observations = self.head_observations(x, num_steps=num_steps, prev_steps=prev_steps)
+        logits_rewards = self.head_rewards(x, num_steps=num_steps, prev_steps=prev_steps)
+        logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
+
+        return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
+    
+    def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
+
+        with torch.no_grad():
+            obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (B, L, K)
+
+        if self.act_vocab_size == 0:
+            tokens = rearrange(obs_tokens, 'b l k -> b (l k)')
+        else:
+            act_tokens = rearrange(batch['actions'], 'b l -> b l 1')
+            tokens = rearrange(torch.cat((obs_tokens, act_tokens), dim=2), 'b l k1 -> b (l k1)')  # (B, L(K+1))
+        bs = tokens.size(0)
+
+        outputs = self(tokens)
+
+        labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
+
+        logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
+        loss_obs = F.cross_entropy(logits_observations, labels_observations)
+        loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
+        loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+
+        # additional reconstruction loss
+        next_observations = batch['observations'][:, 1:]
+        next_logits_observations = rearrange(outputs.logits_observations[:, tokenizer.num_slots*tokenizer.tokens_per_slot:], 'b t o -> (b t) o')
+        z_q = tokenizer.decode_logits(next_logits_observations)
+        z_q = rearrange(z_q, '(b l k t) e -> b l e k t', b=bs, k=tokenizer.num_slots, t=tokenizer.tokens_per_slot)
+        reconstructions = tokenizer.decode(z_q)
+        reconstruction_loss = torch.pow(next_observations - reconstructions, 2).mean()
+
+        if self.act_vocab_size == 0:
+            return LossWithIntermediateLosses(loss_obs=loss_obs)
+        return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)
