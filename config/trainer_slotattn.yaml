@@ -61,7 +61,7 @@ training:
   learning_rate: 0.0001
   sampling_weights: [0.125, 0.125, 0.25, 0.5]
   tokenizer:
-    learning_rate: 0.0005
+    learning_rate: 0.001
     batch_num_samples: 16
     grad_acc_steps: 1
     max_grad_norm: None
@@ -88,7 +88,7 @@ training:
 
 evaluation:
   should: True
-  every: 50
+  every: 20
   tokenizer:
     batch_num_samples: ${training.tokenizer.batch_num_samples}
     start_after_epochs: ${training.tokenizer.start_after_epochs}
