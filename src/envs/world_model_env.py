@@ -6,6 +6,7 @@ from einops import rearrange
 import numpy as np
 from PIL import Image
 import torch
+from models.tokenizer.tokenizer import ObsTokenizer, ActTokenizer
 from torch.distributions.categorical import Categorical
 import torchvision
 
@@ -13,7 +14,8 @@ import torchvision
 class WorldModelEnv:
     def __init__(
         self,
-        tokenizer: torch.nn.Module,
+        obs_tokenizer: ObsTokenizer,
+        act_tokenizer: ActTokenizer,
         world_model: torch.nn.Module,
         device: Union[str, torch.device],
         env: Optional[gym.Env] = None,
@@ -21,7 +23,8 @@ class WorldModelEnv:
 
         self.device = torch.device(device)
         self.world_model = world_model.to(self.device).eval()
-        self.tokenizer = tokenizer.to(self.device).eval()
+        self.obs_tokenizer = obs_tokenizer.to(self.device).eval()
+        self.act_tokenizer = act_tokenizer.to(self.device).eval()
 
         self.keys_values_wm, self.obs_tokens, self._num_observations_tokens = (
             None,
@@ -49,7 +52,7 @@ class WorldModelEnv:
     def reset_from_initial_observations(
         self, observations: torch.FloatTensor
     ) -> torch.FloatTensor:
-        obs_tokens = self.tokenizer.encode(
+        obs_tokens = self.obs_tokenizer.encode(
             observations, should_preprocess=True
         ).tokens  # (B, C, H, W) -> (B, K)
         _, num_observations_tokens = obs_tokens.shape
@@ -83,23 +86,34 @@ class WorldModelEnv:
             self.keys_values_wm is not None and self.num_observations_tokens is not None
         )
 
-        num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
+        num_passes = (
+            1 + int(self.num_observations_tokens) if should_predict_next_obs else 1
+        )
 
         output_sequence, obs_tokens = [], []
 
         if self.keys_values_wm.size + num_passes > self.world_model.config.max_tokens:
             _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
 
+        if action.shape[-1] > 1:
+            act_tokens = (
+                self.act_tokenizer.encode(action) * self.world_model.config.embed_dim
+            ).to(torch.long)
+        else:
+            act_tokens = action
+
         token = (
-            action.clone().detach()
-            if isinstance(action, torch.Tensor)
-            else torch.tensor(action, dtype=torch.long)
+            act_tokens.clone().detach()
+            if isinstance(act_tokens, torch.Tensor)
+            else torch.tensor(act_tokens, dtype=torch.long)
         )
         token = token.to(self.device)  # (B, 1)
 
         for k in range(num_passes):  # assumption that there is only one action token.
 
-            outputs_wm = self.world_model(token, past_keys_values=self.keys_values_wm) # only action tokens are considered, no observation is given 
+            outputs_wm = self.world_model(
+                token, past_keys_values=self.keys_values_wm
+            )  # only action tokens are considered, no observation is given
             output_sequence.append(outputs_wm.output_sequence)
 
             if k == 0:
@@ -141,13 +155,13 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def decode_obs_tokens(self) -> List[Image.Image]:
-        embedded_tokens = self.tokenizer.embedding(self.obs_tokens)  # (B, K, E)
+        embedded_tokens = self.obs_tokenizer.embedding(self.obs_tokens)  # (B, K, E)
         z = rearrange(
             embedded_tokens,
             "b (h w) e -> b e h w",
             h=int(np.sqrt(self.num_observations_tokens)),
         )
-        rec = self.tokenizer.decode(z, should_postprocess=True)  # (B, C, H, W)
+        rec = self.obs_tokenizer.decode(z, should_postprocess=True)  # (B, C, H, W)
         return torch.clamp(rec, 0, 1)
 
     @torch.no_grad()

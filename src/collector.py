@@ -27,7 +27,7 @@ class Collector:
         self.episode_dir_manager = episode_dir_manager
         self.obs = self.env.reset()
         self.episode_ids = [None] * self.env.num_envs
-        self.heuristic = RandomHeuristic(self.env.num_actions, dist="trunc_normal")
+        self.heuristic = RandomHeuristic(self.env.num_actions.n, dist="trunc_normal")
 
     @torch.no_grad()
     def collect(
@@ -42,7 +42,7 @@ class Collector:
         num_steps: Optional[int] = None,
         num_episodes: Optional[int] = None,
     ):
-        assert self.env.num_actions == agent.world_model.act_vocab_size
+        # assert self.env.num_actions == agent.world_model.act_vocab_size
         assert 0 <= epsilon <= 1
 
         assert (num_steps is None) != (num_episodes is None)
@@ -80,7 +80,7 @@ class Collector:
                 .to(agent.device)
             )
             burnin_obs_rec = torch.clamp(
-                agent.tokenizer.encode_decode(
+                agent.obs_tokenizer.encode_decode(
                     burnin_obs, should_preprocess=True, should_postprocess=True
                 ),
                 0,
@@ -143,7 +143,7 @@ class Collector:
                     metrics_episode["action_histogram"] = wandb.Histogram(
                         np_histogram=np.histogram(
                             episode.actions.numpy(),
-                            bins=np.arange(0, self.env.num_actions + 1) - 0.5,
+                            bins=np.arange(0, self.env.num_actions.n + 1) - 0.5,
                             density=True,
                         )
                     )

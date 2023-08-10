@@ -15,6 +15,7 @@ class Slicer(nn.Module):
         self.register_buffer("indices", kept_indices + block_mask.size(0) * offsets)
 
     def compute_slice(self, num_steps: int, prev_steps: int = 0) -> torch.Tensor:
+        # determine which slice of the token vector to consider, given the required pattern
         total_steps = num_steps + prev_steps
         num_blocks = math.ceil(total_steps / self.block_size)
         indices = self.indices[: num_blocks * self.num_kept_tokens]
@@ -35,11 +36,38 @@ class Head(Slicer):
         assert isinstance(head_module, nn.Module)
         self.head_module = head_module
 
+    def forward(
+        self, x: torch.Tensor, num_steps: int, prev_steps: int, single_dim=False
+    ) -> torch.Tensor:
+        x_sliced = x[:, self.compute_slice(num_steps, prev_steps)]  # x is (B, T, E)
+
+        return self.head_module(x_sliced)
+
+
+class ActHead(Head):
+    def __init__(
+        self,
+        max_blocks: int,
+        block_mask: torch.Tensor,
+        head_module: nn.Module,
+        act_dims: int,
+    ) -> None:
+        super().__init__(max_blocks, block_mask, head_module)
+        self.act_dims = act_dims
+
     def forward(self, x: torch.Tensor, num_steps: int, prev_steps: int) -> torch.Tensor:
+
         if num_steps > prev_steps:
             x_sliced = x[:, self.compute_slice(num_steps, prev_steps)]  # x is (B, T, E)
         else:
             x_sliced = x
+
+        B, T, _ = x_sliced.shape
+        if T > 0:
+            x_sliced = torch.reshape(
+                x_sliced, (B, int(T / self.act_dims), -1)
+            )  # reshape to have all actions variables at the last dimension
+
         return self.head_module(x_sliced)
 
 

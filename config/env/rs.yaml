@@ -1,8 +1,10 @@
+action_vocab_size: 256   
+act_dims: 4
 train:
   _target_: envs.make_rs
   env_config:
     horizon: 250
-    controller: "OSC_POSE" # "pd_ee_delta_pos"      
+    controller: "OSC_POSE" # "pd_ee_delta_pos"  
     renderer:
       fps: 30
       size: [64, 64]
@@ -35,3 +37,4 @@ test:
   seed: ${..train.seed}
   action_repeat: ${..train.action_repeat}
 keymap: rs/${.train.task}
+

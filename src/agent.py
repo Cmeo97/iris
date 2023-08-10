@@ -5,17 +5,18 @@ from torch.distributions.categorical import Categorical
 import torch.nn as nn
 
 from models.actor_critic import ActorCritic
-from models.tokenizer import Tokenizer
+from models.tokenizer import ObsTokenizer, ActTokenizer
 from models.world_model import WorldModel
 from utils import extract_state_dict
 
 
 class Agent(nn.Module):
     def __init__(
-        self, tokenizer: Tokenizer, world_model: WorldModel, actor_critic: ActorCritic
+        self, obs_tokenizer: ObsTokenizer, act_tokenizer: ActTokenizer, world_model: WorldModel, actor_critic: ActorCritic
     ):
         super().__init__()
-        self.tokenizer = tokenizer
+        self.obs_tokenizer = obs_tokenizer
+        self.act_tokenizer = act_tokenizer        
         self.world_model = world_model
         self.actor_critic = actor_critic
 
@@ -33,8 +34,11 @@ class Agent(nn.Module):
     ) -> None:
         agent_state_dict = torch.load(path_to_checkpoint, map_location=device)
         if load_tokenizer:
-            self.tokenizer.load_state_dict(
-                extract_state_dict(agent_state_dict, "tokenizer")
+            self.obs_tokenizer.load_state_dict(
+                extract_state_dict(agent_state_dict, "obs_tokenizer")
+            )
+            self.act_tokenizer.load_state_dict(
+                extract_state_dict(agent_state_dict, "act_tokenizer")
             )
         if load_world_model:
             self.world_model.load_state_dict(
@@ -55,7 +59,7 @@ class Agent(nn.Module):
             obs
             if self.actor_critic.use_original_obs
             else torch.clamp(
-                self.tokenizer.encode_decode(
+                self.obs_tokenizer.encode_decode(
                     obs, should_preprocess=True, should_postprocess=True
                 ),
                 0,
@@ -64,8 +68,9 @@ class Agent(nn.Module):
         )
 
         dist_actions = self.actor_critic(input_ac).dist_actions  # [:, -1] / temperature
-        act_token = dist_actions.sample()
+        act = dist_actions.sample()
+        
         # if should_sample else
         # else dist_actions.argmax(dim=-1)
 
-        return act_token
+        return act

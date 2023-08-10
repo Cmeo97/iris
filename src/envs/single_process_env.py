@@ -9,7 +9,7 @@ class SingleProcessEnv(DoneTrackerEnv):
     def __init__(self, env_fn):
         super().__init__(num_envs=1)
         self.env = env_fn()
-        self.num_actions = self.env.action_space.n
+        self.num_actions = self.env.action_space # n also for continuous space consider only one action dimension and concatenate along the last dimension
 
     def should_reset(self) -> bool:
         return self.num_envs_done == 1
