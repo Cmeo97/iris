@@ -84,7 +84,7 @@ class dVAE(nn.Module):
         return torch.pow(z - z_quantized, 2).mean() * self.beta
 
     def forward(self, z, tau, hard=False):
-        z_logits = F.log_softmax(self.pre_vq_linear(z), dim=1)
+        z_logits = F.log_softmax(self.pre_vq_linear(z), dim=1) # don't need log?
         z_soft = self.gumbel_softmax(z_logits, tau, hard, dim=1)
         z_hard = self.gumbel_softmax(z_logits, tau, True, dim=1)
         z_q = self.post_vq_linear(z_soft)

@@ -80,7 +80,8 @@ class WorldModelEnv:
             if k < self.num_observations_tokens:
                 logits = outputs_wm.logits_observations
                 if self.tokenizer.slot_based:
-                    token = torch.argmax(outputs_wm.logits_observations, dim=-1)
+                    # token = torch.argmax(outputs_wm.logits_observations, dim=-1)
+                    token = Categorical(logits=outputs_wm.logits_observations).sample()
                 else:
                     token = Categorical(logits=outputs_wm.logits_observations).sample()
                 obs_logits.append(logits)
