@@ -13,7 +13,7 @@ from tqdm import tqdm
 from dataset import Batch
 from envs.world_model_env import WorldModelEnv
 from models.tokenizer import Tokenizer
-from models.world_model import WorldModel
+from models.world_model import WorldModel, OCWorldModel
 from utils import compute_lambda_returns, LossWithIntermediateLosses
 
 
@@ -164,3 +164,40 @@ class ActorCritic(nn.Module):
             rewards=torch.cat(all_rewards, dim=1).to(device),                       # (B, T)
             ends=torch.cat(all_ends, dim=1).to(device),                             # (B, T)
         )
+
+    @torch.no_grad()
+    def rollout(self, batch: Batch, tokenizer: Tokenizer, world_model: OCWorldModel, burn_in: int, horizon: int, show_pbar: bool = False) -> ImagineOutput:
+        assert not self.use_original_obs
+        observations = batch['observations']
+        mask_padding = batch['mask_padding']
+        assert observations.ndim == 5 and observations.shape[2:] == (3, 64, 64)
+        assert mask_padding[:, -1].all()
+        device = observations.device
+        wm_env = WorldModelEnv(tokenizer, world_model, device)
+
+        all_actions = []
+        all_rewards = []
+        all_ends = []
+        all_observations = []
+        all_colors = []
+        all_masks = []
+
+        obs = wm_env.reset_from_initial_observations(observations[:, 0])
+        for k in tqdm(range(horizon), disable=not show_pbar, desc='Rollout', file=sys.stdout):
+
+            action_token = rearrange(batch['actions'][:, k], 'b -> b 1 1')
+            obs, color, mask, reward, done, _ = wm_env.step(action_token, should_predict_next_obs=True, should_return_slots=True)
+
+            all_actions.append(action_token)
+            all_rewards.append(torch.tensor(reward).reshape(-1, 1))
+            all_ends.append(torch.tensor(done).reshape(-1, 1))
+            all_observations.append(obs)
+            all_colors.append(color)
+            all_masks.append(mask)
+
+        all_observations = torch.stack(all_observations, dim=1) # (B, T, C, H, W)
+        all_colors = torch.stack(all_colors, dim=1)
+        all_masks = torch.stack(all_masks, dim=1)
+        print(all_observations.shape, all_colors.shape, all_masks.shape)
+
+        return all_observations, all_colors, all_masks

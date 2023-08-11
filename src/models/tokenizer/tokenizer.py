@@ -334,6 +334,13 @@ class OCTokenizerSeparate(OCTokenizer):
         z_q = self.encode(x, should_preprocess).z_quantized #TODO: z_quantized or z?
         return self.decode_slots(z_q, should_postprocess)
 
+    def encode_logits(self, z):
+        bs = z.shape[0]
+        z = rearrange(z.detach(), 'b e k t -> (b k t) e')
+        z_logits = F.log_softmax(self.quantizer.pre_vq_linear(z), dim=1)
+        z_logits = rearrange(z_logits, '(b k) e -> b k e', b=bs)
+        return z_logits
+
     def decode_logits(self, logits):
         z_soft = self.quantizer.gumbel_softmax(logits, self.tau, False, dim=1)
         z_q = self.quantizer.post_vq_linear(z_soft)

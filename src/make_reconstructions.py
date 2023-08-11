@@ -32,8 +32,13 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
     colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
     masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
 
+    save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch)
+
+def save_image_with_slots(observations, recons, colors, masks, save_dir, epoch, suffix='sample'):
+    b, t, _, _, _ = observations.size()
+
     for i in range(b):
-        obs = batch['observations'][i].cpu() # (t c h w)
+        obs = observations[i].cpu() # (t c h w)
         recon = recons[i].cpu() # (t c h w)
 
         full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
@@ -45,7 +50,7 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
         full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
         full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
 
-        save_image(full_plot, save_dir / f'epoch_{epoch:03d}_sample_{i:03d}.png', nrow=t)
+        save_image(full_plot, save_dir / f'epoch_{epoch:03d}_{suffix}_{i:03d}.png', nrow=t)
 
     return
 

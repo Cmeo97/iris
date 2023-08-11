@@ -20,7 +20,7 @@ from collector import Collector
 # from collector import VIPERCollector as Collector
 from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
-from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch
+from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch, save_image_with_slots
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel, OCWorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed, linear_warmup_exp_decay
@@ -229,6 +229,7 @@ class Trainer:
             if self.slot_based:
                 batch['observations'] = torch.cat([batch['observations'], tr_batch['observations']], dim=0)
                 make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+                self.inspect_world_model(epoch)
             else:
                 make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
 
@@ -256,6 +257,13 @@ class Trainer:
         intermediate_losses = {k: v / steps for k, v in intermediate_losses.items()}
         metrics = {f'{str(component)}/eval/total_loss': loss_total_epoch / steps, **intermediate_losses}
         return metrics
+
+    @torch.no_grad()
+    def inspect_world_model(self, epoch: int) -> None:
+        batch = self.train_dataset.sample_batch(batch_num_samples=1, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
+        recons, colors, masks = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, burn_in=5, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
+
+        save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, colors, masks, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
 
     @torch.no_grad()
     def inspect_imagination(self, epoch: int) -> None:
