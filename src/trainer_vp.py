@@ -27,6 +27,8 @@ from utils import configure_optimizer, EpisodeDirManager, set_seed, linear_warmu
 
 class VPTrainer:
     def __init__(self, cfg: DictConfig) -> None:
+        print(OmegaConf.to_container(cfg, resolve=True))
+        print(**cfg.wandb)
         wandb.init(
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,

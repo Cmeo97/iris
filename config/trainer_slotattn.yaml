@@ -9,9 +9,9 @@ defaults:
 wandb:
   mode: online
   project: IRIS
-  entity: null
-  name: null
-  group: null
+  entity: cmeo97
+  name: exp1_
+  group: iris
   tags: null
   notes: null
 

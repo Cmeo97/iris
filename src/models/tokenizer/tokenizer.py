@@ -350,6 +350,10 @@ class OCTokenizerSeparate(OCTokenizer):
         z_hard = F.one_hot(tokens, num_classes=self.vocab_size).float()
         z_q = self.quantizer.post_vq_linear(z_hard)
         return z_q
+    
+    def decode_embeddings(self, z):
+        z_q = self.quantizer.post_vq_linear(z)
+        return z_q
 
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
         """x is supposed to be channels first and in [0, 1]"""

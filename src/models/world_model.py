@@ -177,6 +177,7 @@ class OCWorldModel(WorldModel):
         self.tokens_per_block = config.tokens_per_block
         self.max_blocks = config.max_blocks
         self.spatial_pos_emb = PositionalEmbedding(config.tokens_per_block, config.embed_dim)
+        self.kl_div = nn.KLDivLoss(reduction="batchmean")
         # self.temporal_pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
 
     def forward(self, tokens: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
@@ -213,14 +214,15 @@ class OCWorldModel(WorldModel):
         labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
         logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
-        loss_obs = F.cross_entropy(logits_observations, labels_observations)
+        #loss_obs = F.cross_entropy(
+        loss_obs = self.kl_div(logits_observations, labels_observations)
         loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
         loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 
         # additional reconstruction loss
         next_observations = batch['observations'][:, 1:]
         next_logits_observations = rearrange(outputs.logits_observations[:, tokenizer.num_slots*tokenizer.tokens_per_slot:], 'b t o -> (b t) o')
-        z_q = tokenizer.decode_logits(next_logits_observations)
+        z_q = tokenizer.decode_embeddings(next_logits_observations)
         z_q = rearrange(z_q, '(b l k t) e -> b l e k t', b=bs, k=tokenizer.num_slots, t=tokenizer.tokens_per_slot)
         reconstructions = tokenizer.decode(z_q)
         reconstruction_loss = torch.pow(next_observations - reconstructions, 2).mean()
