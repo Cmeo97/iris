@@ -35,16 +35,17 @@ class WorldModelEnv:
     @torch.no_grad()
     def reset_from_initial_observations(self, observations: torch.FloatTensor) -> torch.FloatTensor:
         outputs = self.tokenizer.encode(observations, should_preprocess=True)
-        obs_tokens = outputs.tokens    # (B, C, H, W) -> (B, K)
-        _, num_observations_tokens = obs_tokens.shape
+        self.obs_tokens = outputs.z
+        #obs_tokens = outputs.tokens    # (B, C, H, W) -> (B, K)
+        num_observations_tokens = self.obs_tokens.shape[1]
         if self.num_observations_tokens is None:
             self._num_observations_tokens = num_observations_tokens
 
-        _ = self.refresh_keys_values_with_initial_obs_tokens(obs_tokens)
-        self.obs_tokens = obs_tokens
-        self.obs_logits = self.tokenizer.encode_logits(outputs.z)
+        _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
+        
+        out = self.tokenizer.encode_logits(outputs.z)
 
-        return self.decode_obs_tokens()
+        return out
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
@@ -81,7 +82,7 @@ class WorldModelEnv:
                 logits = outputs_wm.logits_observations
                 if self.tokenizer.slot_based:
                     # token = torch.argmax(outputs_wm.logits_observations, dim=-1)
-                    token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    token = outputs_wm.logits_observations #Categorical(logits=outputs_wm.logits_observations).sample()
                 else:
                     token = Categorical(logits=outputs_wm.logits_observations).sample()
                 obs_logits.append(logits)
@@ -94,10 +95,12 @@ class WorldModelEnv:
         if self.tokenizer.slot_based:
             obs, color, mask = self.decode_obs_tokens() if should_predict_next_obs else None
             if should_return_slots:
-                return obs, color, mask, reward, done, None
+                return self.obs_tokens, color, mask, reward, done, None
+            else:
+                return self.obs_tokens, reward, done, None
         else:
             obs = self.decode_obs_tokens() if should_predict_next_obs else None
-        return obs, reward, done, None
+            return obs, reward, done, None
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:

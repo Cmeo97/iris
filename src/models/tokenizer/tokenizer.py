@@ -336,7 +336,10 @@ class OCTokenizerSeparate(OCTokenizer):
 
     def encode_logits(self, z):
         bs = z.shape[0]
-        z = rearrange(z.detach(), 'b e k t -> (b k t) e')
+        if len(z.shape) > 4:
+            z = rearrange(z.detach(), 'b s e k t -> (b s k t) e')
+        else:
+            z = rearrange(z.detach(), 'b e k t -> (b k t) e')
         z_logits = F.log_softmax(self.quantizer.pre_vq_linear(z), dim=1)
         z_logits = rearrange(z_logits, '(b k) e -> b k e', b=bs)
         return z_logits

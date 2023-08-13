@@ -178,24 +178,25 @@ class OCWorldModel(WorldModel):
         self.max_blocks = config.max_blocks
         self.spatial_pos_emb = PositionalEmbedding(config.tokens_per_block, config.embed_dim)
         self.kl_div = nn.KLDivLoss(reduction="batchmean")
+        self.head_dyn_prior = self.head_observations
         # self.temporal_pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
 
-    def forward(self, tokens: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
+    def forward(self, z: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
 
-        num_steps = tokens.size(1)  # (B, T)
+        num_steps = z.size(1)  # (B, T)
         assert num_steps <= self.config.max_tokens
         prev_steps = 0 if past_keys_values is None else past_keys_values.size
 
-        spatial_emb = self.spatial_pos_emb(torch.arange(self.tokens_per_block, device=tokens.device)).repeat(self.max_blocks, 1)[:num_steps]
-        sequences = self.embedder(tokens, num_steps, prev_steps) + self.pos_emb(prev_steps + torch.arange(num_steps, device=tokens.device)) + spatial_emb
+        spatial_emb = self.spatial_pos_emb(torch.arange(self.tokens_per_block, device=z.device)).repeat(self.max_blocks, 1)[:num_steps]
+        sequences = self.embedder(z, num_steps, prev_steps) + self.pos_emb(prev_steps + torch.arange(num_steps, device=z.device)) + spatial_emb
 
         x = self.transformer(sequences, past_keys_values)
 
-        logits_observations = self.head_observations(x, num_steps=num_steps, prev_steps=prev_steps)
+        prior = self.head_dyn_prior(x, num_steps=num_steps, prev_steps=prev_steps)
         logits_rewards = self.head_rewards(x, num_steps=num_steps, prev_steps=prev_steps)
         logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
 
-        return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
+        return WorldModelOutput(x, prior, logits_rewards, logits_ends)
     
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
 
@@ -215,7 +216,9 @@ class OCWorldModel(WorldModel):
 
         logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
         #loss_obs = F.cross_entropy(
-        loss_obs = self.kl_div(logits_observations, labels_observations)
+        print(logits_observations)
+        print(labels_observations)
+        loss_dyn = self.kl_div(logits_observations, labels_observations)
         loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
         loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 
@@ -228,5 +231,5 @@ class OCWorldModel(WorldModel):
         reconstruction_loss = torch.pow(next_observations - reconstructions, 2).mean()
 
         if self.act_vocab_size == 0:
-            return LossWithIntermediateLosses(loss_obs=loss_obs)
-        return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)
+            return LossWithIntermediateLosses(loss_obs=loss_dyn)
+        return LossWithIntermediateLosses(loss_obs=loss_dyn, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)

@@ -43,7 +43,7 @@ class Collector:
             segmented_episodes = [episode.segment(start=len(episode) - burn_in, stop=len(episode), should_pad=True) for episode in current_episodes]
             mask_padding = torch.stack([episode.mask_padding for episode in segmented_episodes], dim=0).to(agent.device)
             burnin_obs = torch.stack([episode.observations for episode in segmented_episodes], dim=0).float().div(255).to(agent.device)
-            burnin_obs_rec = torch.clamp(agent.tokenizer.encode_decode(burnin_obs, should_preprocess=True, should_postprocess=True), 0, 1)
+            burnin_obs_rec = agent.tokenizer.encode_logits(agent.tokenizer.encode(burnin_obs).z).reshape(-1, 20, 4, 512)
 
         agent.actor_critic.reset(n=self.env.num_envs, burnin_observations=burnin_obs_rec, mask_padding=mask_padding)
         pbar = tqdm(total=num_steps if num_steps is not None else num_episodes, desc=f'Experience collection ({self.dataset.name})', file=sys.stdout)
@@ -55,7 +55,8 @@ class Collector:
             act = agent.act(obs, should_sample=should_sample, temperature=temperature).cpu().numpy()
 
             if random.random() < epsilon:
-                act = self.heuristic.act(obs).cpu().numpy()
+                act = self.heuristic.act(obs.repeat(4, 1, 1, 1)).cpu().numpy()
+               
 
             self.obs, reward, done, _ = self.env.step(act)
 
@@ -63,7 +64,7 @@ class Collector:
             if "test" in self.dataset.name and steps >= 200:
                 done = np.array([True] * self.env.num_envs)
                 self.env.update_done_tracker(done)
-
+           
             actions.append(act)
             rewards.append(reward)
             dones.append(done)
