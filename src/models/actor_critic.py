@@ -198,6 +198,5 @@ class ActorCritic(nn.Module):
         all_observations = torch.stack(all_observations, dim=1) # (B, T, C, H, W)
         all_colors = torch.stack(all_colors, dim=1)
         all_masks = torch.stack(all_masks, dim=1)
-        print(all_observations.shape, all_colors.shape, all_masks.shape)
 
         return all_observations, all_colors, all_masks

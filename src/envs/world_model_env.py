@@ -22,6 +22,8 @@ class WorldModelEnv:
 
         self.env = env
 
+        self.slot_based = tokenizer.slot_based
+
     @property
     def num_observations_tokens(self) -> int:
         return self._num_observations_tokens
@@ -44,7 +46,8 @@ class WorldModelEnv:
         self.obs_tokens = obs_tokens
         self.obs_logits = self.tokenizer.encode_logits(outputs.z)
 
-        return self.decode_obs_tokens()
+        rec, _, _ = self.decode_obs_tokens()
+        return rec
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
@@ -79,7 +82,7 @@ class WorldModelEnv:
 
             if k < self.num_observations_tokens:
                 logits = outputs_wm.logits_observations
-                if self.tokenizer.slot_based:
+                if self.slot_based:
                     # token = torch.argmax(outputs_wm.logits_observations, dim=-1)
                     token = Categorical(logits=outputs_wm.logits_observations).sample()
                 else:
@@ -91,12 +94,12 @@ class WorldModelEnv:
         self.obs_logits = torch.cat(obs_logits, dim=1)        # (B, K, E)
         self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
-        if self.tokenizer.slot_based:
-            obs, color, mask = self.decode_obs_tokens() if should_predict_next_obs else None
-            if should_return_slots:
-                return obs, color, mask, reward, done, None
+        if should_predict_next_obs:
+            obs, color, mask = self.decode_obs_tokens()
         else:
-            obs = self.decode_obs_tokens() if should_predict_next_obs else None
+            obs, color, mask = None, None, None
+        if should_return_slots:
+            return obs, color, mask, reward, done, None
         return obs, reward, done, None
 
     @torch.no_grad()
@@ -107,16 +110,16 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def decode_obs_tokens(self) -> List[Image.Image]:
-        if self.tokenizer.slot_based:
+        color, mask = None, None
+        if self.slot_based:
             embedded_tokens = self.tokenizer.decode_logits(self.obs_logits)     # (B, K, E)
             z = rearrange(embedded_tokens, 'b (k t) e -> b e k t', k=self.tokenizer.num_slots, t=self.tokenizer.tokens_per_slot)
             rec, color, mask = self.tokenizer.decode_slots(z, should_postprocess=True)         # (B, C, H, W)
-            return torch.clamp(rec, 0, 1), color, mask
         else:
             embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)
             z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
             rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
-            return torch.clamp(rec, 0, 1)
+        return torch.clamp(rec, 0, 1), color, mask
 
     @torch.no_grad()
     def render(self):
