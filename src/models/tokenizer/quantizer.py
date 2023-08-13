@@ -63,8 +63,12 @@ class dVAE(nn.Module):
 
         self.pre_vq_linear = nn.Linear(embed_dim, vocab_size)
         self.post_vq_linear = nn.Linear(vocab_size, embed_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
 
+        self.ref_count = torch.zeros(vocab_size)
+        self.ref_count_log = []
         self.save_after = 25
+        self.save_count_every = 25
         self.pca = None
 
     def gumbel_softmax(self, logits, tau=1., hard=False, dim=-1):
@@ -90,12 +94,28 @@ class dVAE(nn.Module):
         z_q = self.post_vq_linear(z_soft)
         tokens = z_hard.argmax(dim=-1)
 
+        tokens_onehot = F.one_hot(tokens, num_classes=self.vocab_size).float()
+        if z_logits.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
         self.slot_targ = z.detach()
         self.slot_repr = z_q.detach()
         return tokens, z_q
 
+    def _reset_count(self):
+        self.ref_count = torch.zeros(self.vocab_size)
+        self.ref_count_log = []
+    
     def plot_count(self, epoch, save_dir):
-        pass
+        self.ref_count_log.append(self.ref_count.numpy())
+        if epoch >= self.save_after and epoch % self.save_count_every == 0:
+            plt.figure(figsize=(10,1))
+            plt.imshow(self.ref_count_log)
+            plt.tight_layout()
+            plt.savefig(save_dir / f"ref_count_{epoch}.png")
+            plt.close()
+            self._reset_count()
 
     def plot_slot_dist(self, epoch, save_dir):
         if epoch >= self.save_after and self.slot_repr is not None:
