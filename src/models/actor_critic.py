@@ -17,54 +17,6 @@ from models.world_model import WorldModel, OCWorldModel
 from utils import compute_lambda_returns, LossWithIntermediateLosses
 
 
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-activations = {
-    'relu': nn.ReLU(),
-    'tanh': nn.Tanh(),
-    'gelu': nn.GELU(),
-    'silu': nn.SiLU(),
-}
-
-
-class MLP(nn.Module):
-    def __init__(
-        self, 
-        in_dim, 
-        hidden_list, 
-        out_dim, 
-        std=np.sqrt(2),
-        bias_const=0.0,
-        activation='tanh'):
-
-        #ctor: {layers: 5, units: 1024, act: silu, norm: layer, minstd: 0.1, maxstd: 1.0, outscale: 1.0, outnorm: False, unimix: 0.01, inputs: [deter, stoch], winit: normal, fan: avg, symlog_inputs: False}
-        #critic: {layers: 5, units: 1024, act: silu, norm: layer, dist: symlog_disc, outscale: 0.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg, bins: 255, symlog_inputs: False}
-  
-        super().__init__()
-        assert activation in ['relu', 'tanh', 'gelu', 'silu']
-        self.layer_norm = nn.LayerNorm(512)
-        self.layers = nn.ModuleList()
-        self.layers.append(layer_init(nn.Linear(in_dim, hidden_list[0])))
-        self.layers.append(nn.LayerNorm(512))
-        self.layers.append(activations[activation])
-        
-        for i in range(len(hidden_list)-1):
-            self.layers.append(layer_init(nn.Linear(hidden_list[i], hidden_list[i+1])))
-            self.layers.append(nn.LayerNorm(512))
-            self.layers.append(activations[activation])
-        self.layers.append(layer_init(nn.Linear(hidden_list[-1],out_dim), std=std, bias_const=bias_const))
-    
-    def forward(self, x):
-        out = x
-        for layer in self.layers:
-            out = layer(out)
-        return out
-
-
 @dataclass
 class ActorCriticOutput:
     logits_actions: torch.FloatTensor
@@ -85,12 +37,21 @@ class ActorCritic(nn.Module):
     def __init__(self, act_vocab_size, use_original_obs: bool = False) -> None:
         super().__init__()
         self.use_original_obs = use_original_obs
-    
-        self.critic = MLP(512, [512, 512, 512, 512, 512], 1, activation='silu')
-        
-        self.actor = MLP(512, [512, 512, 512, 512, 512], act_vocab_size, activation='silu')
-        self.device = self.actor.layers[0].weight.device
-       
+        self.conv1 = nn.Conv2d(3, 32, 3, stride=1, padding=1)
+        self.maxp1 = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 32, 3, stride=1, padding=1)
+        self.maxp2 = nn.MaxPool2d(2, 2)
+        self.conv3 = nn.Conv2d(32, 64, 3, stride=1, padding=1)
+        self.maxp3 = nn.MaxPool2d(2, 2)
+        self.conv4 = nn.Conv2d(64, 64, 3, stride=1, padding=1)
+        self.maxp4 = nn.MaxPool2d(2, 2)
+
+        self.lstm_dim = 512
+        self.lstm = nn.LSTMCell(1024, self.lstm_dim)
+        self.hx, self.cx = None, None
+
+        self.critic_linear = nn.Linear(512, 1)
+        self.actor_linear = nn.Linear(512, act_vocab_size)
 
     def __repr__(self) -> str:
         return "actor_critic"
@@ -99,34 +60,44 @@ class ActorCritic(nn.Module):
         self.hx, self.cx = None, None
 
     def reset(self, n: int, burnin_observations: Optional[torch.Tensor] = None, mask_padding: Optional[torch.Tensor] = None) -> None:
-        #self.hx = torch.zeros(n, self.lstm_dim, device=device)
-        #self.cx = torch.zeros(n, self.lstm_dim, device=device)
+        device = self.conv1.weight.device
+        self.hx = torch.zeros(n, self.lstm_dim, device=device)
+        self.cx = torch.zeros(n, self.lstm_dim, device=device)
         if burnin_observations is not None:
-            assert burnin_observations.size(0) == n and mask_padding is not None and burnin_observations.shape[:2] == mask_padding.shape
+            assert burnin_observations.ndim == 5 and burnin_observations.size(0) == n and mask_padding is not None and burnin_observations.shape[:2] == mask_padding.shape
             for i in range(burnin_observations.size(1)):
                 if mask_padding[:, i].any():
                     with torch.no_grad():
                         self(burnin_observations[:, i], mask_padding[:, i])
 
+    @property
+    def device(self):
+        return self.conv1.weight.device
+    
     def prune(self, mask: np.ndarray) -> None:
-        #self.hx = self.hx[mask]
-        #self.cx = self.cx[mask]
-        pass
+        self.hx = self.hx[mask]
+        self.cx = self.cx[mask]
 
     def forward(self, inputs: torch.FloatTensor, mask_padding: Optional[torch.BoolTensor] = None) -> ActorCriticOutput:
-        #assert inputs.ndim == 4 and inputs.shape[1:] == (3, 64, 64)
-        #assert 0 <= inputs.min() <= 1 and 0 <= inputs.max() <= 1
+        assert inputs.ndim == 4 and inputs.shape[1:] == (3, 64, 64)
+        assert 0 <= inputs.min() <= 1 and 0 <= inputs.max() <= 1
         assert mask_padding is None or (mask_padding.ndim == 1 and mask_padding.size(0) == inputs.size(0) and mask_padding.any())
         x = inputs[mask_padding] if mask_padding is not None else inputs
-        if x.shape[0] == 1:
-            x = x.squeeze(0)
-      
-        if len(x.shape) == 2:
-            logits_actions = rearrange(self.actor(x), 'b a -> b 1 a')
-            means_values = rearrange(self.critic(x), 'b 1 -> b 1 1') 
+
+        x = x.mul(2).sub(1)
+        x = F.relu(self.maxp1(self.conv1(x)))
+        x = F.relu(self.maxp2(self.conv2(x)))
+        x = F.relu(self.maxp3(self.conv3(x)))
+        x = F.relu(self.maxp4(self.conv4(x)))
+        x = torch.flatten(x, start_dim=1)
+
+        if mask_padding is None:
+            self.hx, self.cx = self.lstm(x, (self.hx, self.cx))
         else:
-            logits_actions = self.actor(x)
-            means_values = self.critic(x)      
+            self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x, (self.hx[mask_padding], self.cx[mask_padding]))
+
+        logits_actions = rearrange(self.actor_linear(self.hx), 'b a -> b 1 a')
+        means_values = rearrange(self.critic_linear(self.hx), 'b 1 -> b 1 1')
 
         return ActorCriticOutput(logits_actions, means_values)
 
