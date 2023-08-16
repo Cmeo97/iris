@@ -35,22 +35,21 @@ class WorldModelEnv:
     @torch.no_grad()
     def reset_from_initial_observations(self, observations: torch.FloatTensor) -> torch.FloatTensor:
         outputs = self.tokenizer.encode(observations, should_preprocess=True)
-        self.obs_tokens = outputs.z
+        self.obs_tokens = self.tokenizer.encode_logits(outputs.z)
+
         #obs_tokens = outputs.tokens    # (B, C, H, W) -> (B, K)
         num_observations_tokens = self.obs_tokens.shape[1]
         if self.num_observations_tokens is None:
             self._num_observations_tokens = num_observations_tokens
 
-        _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
+        _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens.squeeze(0))
         
-        out = self.tokenizer.encode_logits(outputs.z)
-
-        return out
+        return self.obs_tokens
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
         n, num_observations_tokens = obs_tokens.shape
-        assert num_observations_tokens == self.num_observations_tokens
+        assert n == self.num_observations_tokens
         self.keys_values_wm = self.world_model.transformer.generate_empty_keys_values(n=n, max_tokens=self.world_model.config.max_tokens)
         outputs_wm = self.world_model(obs_tokens, past_keys_values=self.keys_values_wm)
         return outputs_wm.output_sequence  # (B, K, E)

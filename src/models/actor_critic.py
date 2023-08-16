@@ -121,8 +121,12 @@ class ActorCritic(nn.Module):
         if x.shape[0] == 1:
             x = x.squeeze(0)
       
-        logits_actions = rearrange(self.actor(x), 'b a -> b 1 a')
-        means_values = rearrange(self.critic(x), 'b 1 -> b 1 1')
+        if len(x.shape) == 2:
+            logits_actions = rearrange(self.actor(x), 'b a -> b 1 a')
+            means_values = rearrange(self.critic(x), 'b 1 -> b 1 1') 
+        else:
+            logits_actions = self.actor(x)
+            means_values = self.critic(x)      
 
         return ActorCriticOutput(logits_actions, means_values)
 
