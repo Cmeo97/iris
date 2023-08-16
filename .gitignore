@@ -10,7 +10,7 @@ experiments
 __pycache__/
 *.py[cod]
 *$py.class
-
+.nfs*
 # C extensions
 *.so
 
