@@ -141,10 +141,11 @@ class Trainer:
                 wandb.log({'epoch': epoch, **metrics})
 
             if self.slot_based:
-                # self.agent.tokenizer.quantizer.plot_count(epoch, self.reconstructions_dir) # for debugging
+                self.agent.tokenizer.quantizer.plot_count(epoch, self.reconstructions_dir) # for debugging
                 # self.agent.tokenizer.quantizer.plot_slot_dist(epoch, self.reconstructions_dir) # for debugging
                 # self.agent.tokenizer.quantizer.plot_codebook(epoch, self.reconstructions_dir) # for debugging
                 self.agent.tokenizer.set_tau()
+                self.agent.world_model.plot_count(epoch, self.reconstructions_dir) # for debugging
 
         self.finish()
 
@@ -165,7 +166,7 @@ class Trainer:
         self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
-            metrics_world_model = self.train_component(self.agent.world_model, self.optimizer_world_model, self.scheduler_world_model, sequence_length=self.cfg.common.sequence_length, sample_from_start=True, sampling_weights=w, tokenizer=self.agent.tokenizer, **cfg_world_model)
+            metrics_world_model = self.train_component(self.agent.world_model, self.optimizer_world_model, self.scheduler_world_model, sequence_length=2, sample_from_start=True, sampling_weights=w, tokenizer=self.agent.tokenizer, **cfg_world_model)
         self.agent.world_model.eval()
 
         if epoch > cfg_actor_critic.start_after_epochs:

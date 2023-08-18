@@ -3,6 +3,7 @@ from typing import Any, Optional, Tuple
 import math
 
 from einops import rearrange
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -179,6 +180,11 @@ class OCWorldModel(WorldModel):
         self.spatial_pos_emb = PositionalEmbedding(config.tokens_per_block, config.embed_dim)
         # self.temporal_pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
 
+        self.ref_count = torch.zeros(obs_vocab_size)
+        self.ref_count_log = []
+        self.save_after = 25
+        self.save_count_every = 25
+
     def forward(self, tokens: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
 
         num_steps = tokens.size(1)  # (B, T)
@@ -193,6 +199,12 @@ class OCWorldModel(WorldModel):
         logits_observations = self.head_observations(x, num_steps=num_steps, prev_steps=prev_steps)
         logits_rewards = self.head_rewards(x, num_steps=num_steps, prev_steps=prev_steps)
         logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
+
+        if x.requires_grad:
+            logits = rearrange(logits_observations[:, :-1], 'b t o -> (b t) o')
+            tokens = logits.argmax(dim=-1)
+            tokens_onehot = F.one_hot(tokens, num_classes=self.obs_vocab_size).float()
+            self.ref_count += tokens_onehot.sum(dim=0).detach().cpu()
 
         return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
     
@@ -227,4 +239,19 @@ class OCWorldModel(WorldModel):
 
         if self.act_vocab_size == 0:
             return LossWithIntermediateLosses(loss_obs=loss_obs)
+        # return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
         return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)
+
+    def _reset_count(self):
+        self.ref_count = torch.zeros(self.obs_vocab_size)
+        self.ref_count_log = []
+    
+    def plot_count(self, epoch, save_dir):
+        self.ref_count_log.append(self.ref_count.numpy())
+        if epoch >= self.save_after and epoch % self.save_count_every == 0:
+            plt.figure(figsize=(10,1))
+            plt.imshow(self.ref_count_log)
+            plt.tight_layout()
+            plt.savefig(save_dir / f"ref_count_wm_{epoch}.png")
+            plt.close()
+            self._reset_count()
