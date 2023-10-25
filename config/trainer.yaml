@@ -7,10 +7,10 @@ defaults:
   - datasets: default
 
 wandb:
-  mode: disabled
+  mode: online
   project: IRIS
   entity: cmeo97
-  name: exp_vanilla-iris
+  name: exp_vanilla-iris-atari
   group: iris
   tags: null
   notes: null
