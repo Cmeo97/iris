@@ -39,14 +39,16 @@ class WorldModelEnv:
         if self.num_observations_tokens is None:
             self._num_observations_tokens = num_observations_tokens
 
-        _ = self.refresh_keys_values_with_initial_obs_tokens(obs_tokens)
+       
+        obs_tokens_dict = {'z': obs_tokens.unsqueeze(1)} # where the last obs token is added to mimic action and have the correct dimensionality 
+        _ = self.refresh_keys_values_with_initial_obs_tokens(obs_tokens_dict)
         self.obs_tokens = obs_tokens
 
         return self.decode_obs_tokens()
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
-        n, num_observations_tokens = obs_tokens.shape
+        n, _,  num_observations_tokens = obs_tokens['z'].shape
         assert num_observations_tokens == self.num_observations_tokens
         self.keys_values_wm = self.world_model.transformer.generate_empty_keys_values(n=n, max_tokens=self.world_model.config.max_tokens)
         outputs_wm = self.world_model(obs_tokens, past_keys_values=self.keys_values_wm)

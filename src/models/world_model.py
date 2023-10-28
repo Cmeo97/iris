@@ -12,7 +12,7 @@ from .slicer import Embedder, Head
 from .tokenizer import Tokenizer
 from .transformer import Transformer, TransformerConfig
 from utils import init_weights, LossWithIntermediateLosses
-#from .transformerXL import *
+from .transformerXL import *
 
 
 @dataclass
@@ -22,13 +22,18 @@ class WorldModelOutput:
     logits_rewards: torch.FloatTensor
     logits_ends: torch.FloatTensor
 
+@dataclass
+class ContinuosWorldModelOutput:
+    output_sequence: torch.FloatTensor
+    encodings: torch.FloatTensor
+    logits_rewards: torch.FloatTensor
+    logits_ends: torch.FloatTensor
 
 class WorldModel(nn.Module):
     def __init__(self, obs_vocab_size: int, act_vocab_size: int, config: TransformerConfig) -> None:
         super().__init__()
         self.obs_vocab_size, self.act_vocab_size = obs_vocab_size, act_vocab_size
         self.config = config
-
         all_but_last_obs_tokens_pattern = torch.ones(config.tokens_per_block)
         all_but_last_obs_tokens_pattern[-2] = 0
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
@@ -36,12 +41,7 @@ class WorldModel(nn.Module):
         obs_tokens_pattern = 1 - act_tokens_pattern
 
 
-        if self.config['model'] != 'iris':
-            modality_order = ['z', 'a']
-            num_current = 2
-            self.modality_order = modality_order
-            memory_length = config['wm_memory_length']
-            max_length = 1 + config['wm_sequence_length']  # 1 for context
+        if self.config.model== 'iris':
             self.transformer = Transformer(config)
             self.pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
             self.embedder = Embedder(
@@ -49,75 +49,99 @@ class WorldModel(nn.Module):
             block_masks=[act_tokens_pattern, obs_tokens_pattern],
             embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim), nn.Embedding(obs_vocab_size, config.embed_dim)])
             )
+            
 
         # Transformer XL, from tmw https://github.com/jrobine/twm
         # ---------------------------------------------------------------------------
+        else:
 
-        if self.config['model'] == 'irisXL-discrete': #to reproduce iris with transformer XL
-            embeds = {
-                'z': {'in_dim': config.embed_dim, 'categorical': False},
-                'a': {'in_dim': act_vocab_size, 'categorical': True}
-            }
-
-
-            self.transformer = TransformerXL(
-            modality_order, num_current, embeds, embed_dim=config['dyn_embed_dim'],
-            activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],
-            feedforward_dim=config['dyn_feedforward_dim'], head_dim=config['dyn_head_dim'],
-            num_heads=config['dyn_num_heads'], num_layers=config['dyn_num_layers'],
-            memory_length=memory_length, max_length=max_length)
-
-            ## Not sure if needed
-            self.embedder = Embedder(
-            max_blocks=config.max_blocks,
-            block_masks=[act_tokens_pattern],
-            embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim)])
-            )
-
-        elif self.config['model'] == 'irisXL-continuos': #to reproduce iris with transformer XL
-            embeds = {
-                'a': {'in_dim': act_vocab_size, 'categorical': True}
-            }
-
-            self.transformer = TransformerXL(
-            modality_order, num_current, embeds, embed_dim=config['dyn_embed_dim'],
-            activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],
-            feedforward_dim=config['dyn_feedforward_dim'], head_dim=config['dyn_head_dim'],
-            num_heads=config['dyn_num_heads'], num_layers=config['dyn_num_layers'],
-            memory_length=memory_length, max_length=max_length)
-
-            ## Not sure if needed
-            self.embedder = Embedder(
-            max_blocks=config.max_blocks,
-            block_masks=[act_tokens_pattern],
-            embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim)])
-            )
+            modality_order = ['z', 'a']
+            num_current = self.config.tokens_per_block # num obs_tokens + act_tokens = 17
+            self.modality_order = modality_order
+            memory_length = config.wm_memory_length
+            max_length = 1 + config.wm_sequence_length  # 1 for context
 
 
+            if self.config.model == 'irisXL-discrete': #to reproduce iris with transformer XL
+                embeds = {
+                    'z': {'in_dim': obs_vocab_size, 'categorical': True},
+                    'a': {'in_dim': act_vocab_size, 'categorical': True}
+                }
 
-        elif self.config['model'] == 'Asymmetric': #for Asymmetric Transformer XL approach 
-            continuos_embeds = {
-                'a': {'in_dim': act_vocab_size, 'categorical': True}
-            } 
-            discrete_embeds = {
-                'z': {'in_dim': config.embed_dim, 'categorical': False},
-                'a': {'in_dim': act_vocab_size, 'categorical': True}
-            }
-        
-            self.discrete_transformer = TransformerXL(
-            modality_order, num_current, discrete_embeds, embed_dim=config['dyn_embed_dim'],
-            activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],
-            feedforward_dim=config['dyn_feedforward_dim'], head_dim=config['dyn_head_dim'],
-            num_heads=config['dyn_num_heads'], num_layers=config['dyn_num_layers'],
-            memory_length=memory_length, max_length=max_length)
+                self.embedder = nn.ModuleDict({
+                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                for name, embed in embeds.items()
+                })
 
-            self.continuos_transformer = TransformerXL(
-            modality_order, num_current, continuos_embeds, embed_dim=config['dyn_embed_dim'],
-            activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],
-            feedforward_dim=config['dyn_feedforward_dim'], head_dim=config['dyn_head_dim'],
-            num_heads=config['dyn_num_heads'], num_layers=config['dyn_num_layers'],
-            memory_length=memory_length, max_length=max_length)
+                self.transformer = TransformerXL(
+                modality_order, num_current, self.embedder, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
+                num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
+                memory_length=memory_length, max_length=max_length)
 
+
+            elif self.config.model == 'irisXL-continuos': #to reproduce iris with transformer XL
+                embeds = {
+                    'z': {'in_dim': config.embed_dim, 'categorical': False},
+                    'a': {'in_dim': act_vocab_size, 'categorical': True}
+                }
+
+                self.embedder = nn.ModuleDict({
+                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                for name, embed in embeds.items()
+                })
+
+
+                self.transformer = TransformerXL(
+                modality_order, num_current, embeds, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
+                num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
+                memory_length=memory_length, max_length=max_length)
+
+
+
+            elif self.config.model == 'Asymmetric': #for Asymmetric Transformer XL approach 
+                continuos_embeds = {
+                    'z': {'in_dim': config.embed_dim, 'categorical': False},
+                    'a': {'in_dim': act_vocab_size, 'categorical': True}
+                } 
+                discrete_embeds = {
+                    'z': {'in_dim': obs_vocab_size, 'categorical': True},
+                    'a': {'in_dim': act_vocab_size, 'categorical': True}
+                }
+
+                self.continuos_embedder = nn.ModuleDict({
+                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                for name, embed in continuos_embeds.items()
+                })
+
+                self.discrete_embedder = nn.ModuleDict({
+                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                for name, embed in discrete_embeds.items()
+                })
+
+                self.continuos_transformer = TransformerXL(
+                modality_order, num_current, continuos_embeds, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
+                num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
+                memory_length=memory_length, max_length=max_length)
+
+                self.discrete_transformer = TransformerXL(
+                modality_order, num_current, discrete_embeds, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
+                num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
+                memory_length=memory_length, max_length=max_length)
+
+            else:
+                raise ValueError(f'Unsupported model: {self.config.model}')
 
         #---------------------------------------------------------------------------------
 
@@ -160,7 +184,7 @@ class WorldModel(nn.Module):
 
     def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
 
-        if self.config['model'] == 'iris':
+        if self.config.model == 'iris':
             tokens = inputs['tokens']
             num_steps = tokens.size(1)  # (B, T)
             assert num_steps <= self.config.max_tokens
@@ -174,15 +198,36 @@ class WorldModel(nn.Module):
             logits_rewards = self.head_rewards(x, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
 
-        elif self.config['model'] == 'irisXL-discrete' or self.config['model'] == 'irisXL-continuos':
-            x = self.transformer(inputs)
+            return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
 
-        return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
+        elif self.config.model == 'irisXL-discrete' or self.config.model == 'irisXL-continuos':
+
+            num_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1)  # (B, L, T) -> L*(T+1), 1 for action token
+      
+            assert num_steps <= self.config.max_tokens
+            prev_steps = 0 if past_keys_values is None else past_keys_values.size
+            if past_keys_values is not None and 'a' not in inputs.keys():
+                inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
+                num_steps -= 1 # remove action token step
+
+            tgt_length = inputs.pop('tgt_length') if 'tgt_length' in inputs.keys() else inputs['z'].size(1)
+            stop_mask = inputs.pop('stop_mask') if 'stop_mask' in inputs.keys() else torch.zeros(inputs['z'].shape[:2], device=inputs['z'].device)
+            
+            h, _ = self.transformer(inputs, tgt_length, stop_mask)
+
+            logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
+            logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
+            if self.config.model == 'irisXL-discrete':
+                logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
+                return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends)
+            else:
+                encodings = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
+                return ContinuosWorldModelOutput(h, encodings, logits_rewards, logits_ends)
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
 
 
-        if self.config['model'] == 'iris':
+        if self.config.model == 'iris':
             with torch.no_grad():
                 obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (B, L, K)
 
@@ -198,43 +243,41 @@ class WorldModel(nn.Module):
             loss_obs = F.cross_entropy(logits_observations, labels_observations)
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
-        elif self.config['model'] == 'irisXL-continuos':
+
+        elif self.config.model == 'irisXL-continuos':
             with torch.no_grad():
                 obs_encodings = tokenizer.encode(batch['observations'], should_preprocess=True).z  # (B, L, K)
-
-            tokens_act = batch['actions'] # (B, L(1))
-            inputs = {'z': obs_encodings, 'a': tokens_act}
-
-            with torch.no_grad():
                 context_z = obs_encodings[:, :1] 
                 next_z = obs_encodings[:, :-1]
              
-            z = torch.cat([context_z, z], dim=1).detach()
+            z = torch.cat([context_z, obs_encodings[:, 1:-1]], dim=1)
+
+            inputs = {'z': z, 'a': batch['actions'][:, :-1]}
         
-            target_z = torch.cat([z[:, 1:], next_z], dim=1).detach()
-            stop_mask = batch['ends'] # or , batch['mask_padding']
-     
-            tgt_length = target_z.shape[1]
+            target_z = torch.cat([z[:, 1:], next_z], dim=1)
+            inputs['tgt_length'] = target_z.shape[1]
+            outputs = self(inputs)
 
-            outputs = self(inputs, tgt_length, stop_mask)
+            labels_observations, labels_rewards, labels_ends = self.compute_labels_continuos_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
-            labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
-
-            logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
-            loss_obs = F.cross_entropy(logits_observations, labels_observations)
+            logits_observations = rearrange(outputs.encodings[:, :-1], 'b t o -> (b t) o')
+            loss_obs = F.mse_loss(logits_observations, labels_observations)
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 
-        elif self.config['model'] == 'irisXL-discrete':
+        elif self.config.model == 'irisXL-discrete':
             with torch.no_grad():
-                tokens_obs = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (BL, K)
-
-            tokens_act = batch['actions'] # (B, L(1))
-            inputs = {'z': tokens_obs, 'a': tokens_act}
+                tokens_obs = tokenizer.encode(batch['observations'], should_preprocess=True).tokens # (B, L, K)
+               
+            tokens = {'z': tokens_obs, 'a': batch['actions']}
+            inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
+            
+            inputs['stop_mask'] = batch['ends']  # or , batch['mask_padding']
+            inputs['tgt_length'] = tokens_obs.shape[1]
 
             outputs = self(inputs)
 
-            labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
+            labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(tokens_obs, batch['rewards'], batch['ends'], batch['mask_padding'])
 
             logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
             loss_obs = F.cross_entropy(logits_observations, labels_observations)
@@ -251,72 +294,12 @@ class WorldModel(nn.Module):
         labels_ends = ends.masked_fill(mask_fill, -100)
         return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
+    def compute_labels_continuos_world_model(self, encodings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done
+        mask_fill = torch.logical_not(mask_padding)
+        labels_observations = rearrange(encodings.masked_fill(mask_fill.unsqueeze(-1).expand_as(encodings), -100), 'b t k -> b (t k)')[:, 1:]
+        labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
+        labels_ends = ends.masked_fill(mask_fill, -100)
+        return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
 
-
-class DynamicsModel(nn.Module):
-
-    def __init__(self, config, z_dim, num_actions):
-        super().__init__()
-        self.config = config
-
-        if self.config['discrete']:
-            embeds = {
-                'z': {'in_dim': z_dim, 'categorical': False},
-                'a': {'in_dim': num_actions, 'categorical': True}
-            }
-        else:
-            embeds = {
-                'a': {'in_dim': num_actions, 'categorical': True}
-            } 
-
-        modality_order = ['z', 'a']
-        num_current = 2
-
-        #if config['dyn_input_rewards']:
-        #    embeds['r'] = {'in_dim': 0, 'categorical': False}
-        #    modality_order.append('r')
-#
-        #if config['dyn_input_discounts']:
-        #    embeds['g'] = {'in_dim': 0, 'categorical': False}
-        #    modality_order.append('g')
-
-        self.modality_order = modality_order
-
-        #out_heads = {
-        #    'z': {'hidden_dims': config['dyn_z_dims'], 'out_dim': z_dim},
-        #    'r': {'hidden_dims': config['dyn_reward_dims'], 'out_dim': 1, 'final_bias_init': 0.0},
-        #    'g': {'hidden_dims': config['dyn_discount_dims'], 'out_dim': 1,
-        #          'final_bias_init': config['env_discount_factor']}
-        #}
-
-        memory_length = config['wm_memory_length']
-        max_length = 1 + config['wm_sequence_length']  # 1 for context
-        self.prediction_net = PredictionNet(
-            modality_order, num_current, embeds, embed_dim=config['dyn_embed_dim'],
-            activation=config['dyn_act'], norm=config['dyn_norm'], dropout_p=config['dyn_dropout'],
-            feedforward_dim=config['dyn_feedforward_dim'], head_dim=config['dyn_head_dim'],
-            num_heads=config['dyn_num_heads'], num_layers=config['dyn_num_layers'],
-            memory_length=memory_length, max_length=max_length)
-
-    @property
-    def h_dim(self):
-        return self.prediction_net.embed_dim
-
-    def predict(self, z, a, r, d, tgt_length, mems=None, return_attention=False,
-               ):
-        assert utils.check_no_grad(z, a, r, d)
-        assert mems is None or utils.check_no_grad(*mems)
-
-        #if compute_consistency:
-        #    tgt_length += 1  # add 1 timestep for context
-
-        inputs = {'z': z, 'a': a}
-        #heads = tuple(heads) if heads is not None else ('z', 'r', 'g')
-
-        outputs = self.prediction_net(
-            inputs, tgt_length, stop_mask=d, mems=mems, return_attention=return_attention)
-        out, h, mems, attention = outputs if return_attention else (outputs + (None,))
-
-
-    
