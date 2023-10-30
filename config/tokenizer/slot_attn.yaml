@@ -1,4 +1,4 @@
-_target_: models.tokenizer.OCTokenizerSeparate
+_target_: models.tokenizer.OCTokenizer
 
 vocab_size: 512
 embed_dim: 64
