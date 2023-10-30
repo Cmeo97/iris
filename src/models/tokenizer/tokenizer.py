@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from dataset import Batch
 from .lpips import LPIPS
-from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder
+from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder, SlotAttentionSeparate
 from .quantizer import *
 from utils import LossWithIntermediateLosses
 
@@ -111,18 +111,23 @@ class OCTokenizer(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         self.encoder = encoder
-        self.pre_quant_conv = torch.nn.Conv2d(encoder.config.z_channels, embed_dim, 1) if encoder.config.z_channels != embed_dim else None
+        self.pre_quant_conv = None #nn.Linear(slot_attn.config.token_dim, embed_dim) if slot_attn.config.token_dim != embed_dim else None
         # self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, decoder.config.dec_input_dim, 1) if embed_dim != decoder.config.dec_input_dim else None
+        self.post_quant_conv = None #nn.Linear(embed_dim, decoder.config.dec_input_dim) if embed_dim != decoder.config.dec_input_dim else None
         self.decoder = decoder
         self.slot_attn = slot_attn
         # self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
-        self.quantizer = SkipVQ(slot_attn.config.num_slots, slot_attn.config.tokens_per_slot)
+        # self.quantizer = SkipVQ(slot_attn.config.num_slots, slot_attn.config.tokens_per_slot)
         # self.quantizer = BaseVQ(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
         # self.quantizer = VQEMA(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
         # self.quantizer = VQNearestEmbEMA(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
         # self.quantizer = VQEMAwCodeReset(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
         # self.quantizer = VmfVQ(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
+        # self.quantizer = PerceiverVQ(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
+        # self.quantizer = VQwithReparameterization(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
+        # self.quantizer = SlicedVQ(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
+        # self.quantizer = BinderQuantization(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
+        self.quantizer = SlicedPerceiverVQ(vocab_size, embed_dim, slot_attn.config.num_slots, slot_attn.config.tokens_per_slot, beta=0.25)
 
         self.lpips = LPIPS().eval() if with_lpips else None
         self.width = encoder.config.resolution
@@ -131,12 +136,34 @@ class OCTokenizer(nn.Module):
         self.tokens_per_slot = slot_attn.config.tokens_per_slot
         self.slot_based = True
 
+        self.global_step = 0
+        self.tau = 0.0
+        self.tau_init = 1.0
+        self.tau_final = 0.1
+        self.tau_start_step = 0
+        self.tau_final_step = 50000
+
     def __repr__(self) -> str:
         return "tokenizer"
+    
+    def set_tau(self): # cosine annealing
+        # if self.global_step < self.tau_start_step:
+        #     value = self.tau_init
+        # elif self.global_step >= self.tau_final_step:
+        #     value = self.tau_final
+        # else:
+        #     a = 0.5 * (self.tau_init - self.tau_final)
+        #     b = 0.5 * (self.tau_init + self.tau_final)
+        #     progress = (self.global_step - self.tau_start_step) / (self.tau_final_step - self.tau_start_step)
+        #     value = a * math.cos(math.pi * progress) + b
+        
+        # self.tau = value
+        # self.global_step += 1
+        pass
 
     def forward(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> Tuple[torch.Tensor]:
         outputs = self.encode(x, should_preprocess)
-        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach()
+        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach() * self.tau
         reconstructions = self.decode(decoder_input, should_postprocess)
         return outputs.z, outputs.z_quantized, reconstructions
 
@@ -145,7 +172,7 @@ class OCTokenizer(nn.Module):
         observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
         z, z_quantized, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
 
-        commitment_loss = self.quantizer.compute_loss(z, z_quantized)
+        commitment_loss = self.quantizer.compute_loss(z, z_quantized) * self.tau
         reconstruction_loss = torch.pow(observations - reconstructions, 2).mean()
         if commitment_loss is None:
             return LossWithIntermediateLosses(reconstruction_loss=reconstruction_loss)
@@ -157,14 +184,14 @@ class OCTokenizer(nn.Module):
         shape = x.shape  # (..., C, H, W)
         x = x.view(-1, *shape[-3:])
         z = self.encoder(x)
-        # if self.pre_quant_conv is not None:
-        #     z = self.pre_quant_conv(z)
         b, e, c = z.shape
         z = rearrange(z, 'b e c -> b c e')
         z = self.slot_attn(z)
+        if self.pre_quant_conv is not None:
+            z = self.pre_quant_conv(z)
         z_flattened = rearrange(z, 'b k (t e) -> (b k t) e', t=self.tokens_per_slot)
 
-        tokens, z_q = self.quantizer(z_flattened)
+        tokens, z_q = self.quantizer(z_flattened, self.tau)
         z_q = rearrange(z_q, '(b k t) e -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
 
         z = rearrange(z, 'b k (t e) -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot)
@@ -180,7 +207,9 @@ class OCTokenizer(nn.Module):
         shape = z_q.shape  # (..., E, h, w)
         z_q = z_q.view(-1, *shape[-3:])
         if self.post_quant_conv is not None:
+            z_q = rearrange(z_q, 'b e k t -> b k t e', k=self.num_slots, t=self.tokens_per_slot)
             z_q = self.post_quant_conv(z_q)
+            z_q = rearrange(z_q, 'b k t e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
         rec = self.decoder(z_q)
         rec = rec.reshape(*shape[:-3], *rec.shape[1:])
         if should_postprocess:
@@ -191,7 +220,9 @@ class OCTokenizer(nn.Module):
         shape = z_q.shape  # (..., E, h, w)
         z_q = z_q.view(-1, *shape[-3:])
         if self.post_quant_conv is not None:
+            z_q = rearrange(z_q, 'b e k t -> b k t e', k=self.num_slots, t=self.tokens_per_slot)
             z_q = self.post_quant_conv(z_q)
+            z_q = rearrange(z_q, 'b k t e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
         rec, color, mask = self.decoder(z_q, return_indiv_slots=True)
         rec = rec.reshape(*shape[:-3], *rec.shape[1:])
         color = color.reshape(*shape[:-3], *color.shape[1:])
@@ -206,8 +237,12 @@ class OCTokenizer(nn.Module):
         return self.decode(z_q, should_postprocess)
     
     @torch.no_grad()
-    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
-        z_q = self.encode(x, should_preprocess).z_quantized
+    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False, use_hard: bool = False) -> torch.Tensor:
+        z_q = self.encode(x, should_preprocess).z
+        if use_hard:
+            # z_q = self.encode(x, should_preprocess).z_quantized
+            z_q = self.quantizer.get_embedding(self.encode(x, should_preprocess).tokens)
+            z_q = rearrange(z_q, 'b (k t) e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
         return self.decode_slots(z_q, should_postprocess)
 
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
@@ -223,6 +258,7 @@ class TokenizerSeparateEncoderOutput:
     z: torch.FloatTensor
     z_target: torch.FloatTensor
     z_quantized: torch.FloatTensor
+    z_quantized_hard: torch.FloatTensor
     tokens: torch.LongTensor
 
 class OCTokenizerSeparate(OCTokenizer):
@@ -286,19 +322,21 @@ class OCTokenizerSeparate(OCTokenizer):
 
         z_targ = z.detach()
         z_targ = rearrange(z_targ, 'b k (t e) -> (b k t) e', t=self.tokens_per_slot)
-        tokens, z_q = self.quantizer(z_targ, self.tau)
+        tokens, z_q, z_hard = self.quantizer(z_targ, self.tau)
 
         z = rearrange(z, 'b k (t e) -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot)
         z_targ = rearrange(z_targ, '(b k t) e -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot)
         z_q = rearrange(z_q, '(b k t) e -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
+        z_hard = rearrange(z_hard, '(b k t) e -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
         
         # Reshape to original
         z = z.reshape(*shape[:-3], *z.shape[1:])
         z_targ = z_targ.reshape(*shape[:-3], *z_targ.shape[1:])
         z_q = z_q.reshape(*shape[:-3], *z_q.shape[1:])
+        z_hard = z_hard.reshape(*shape[:-3], *z_hard.shape[1:])
         tokens = tokens.reshape(*shape[:-3], -1)
 
-        return TokenizerSeparateEncoderOutput(z, z_targ, z_q, tokens)
+        return TokenizerSeparateEncoderOutput(z, z_targ, z_q, z_hard, tokens)
 
     def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z_q.shape  # (..., E, h, w)
@@ -330,8 +368,10 @@ class OCTokenizerSeparate(OCTokenizer):
         return self.decode(z_q, should_postprocess)
     
     @torch.no_grad()
-    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
+    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False, use_hard: bool = False) -> torch.Tensor:
         z_q = self.encode(x, should_preprocess).z_quantized #TODO: z_quantized or z?
+        if use_hard:
+            z_q = self.encode(x, should_preprocess).z_quantized_hard
         return self.decode_slots(z_q, should_postprocess)
 
     def encode_logits(self, z):
@@ -359,3 +399,101 @@ class OCTokenizerSeparate(OCTokenizer):
         """y is supposed to be channels first and in [-1, 1]"""
         return y.add(1).div(2)
 
+
+
+@dataclass
+class TokenizerWithPosEncoderOutput:
+    z: torch.FloatTensor
+    pos: torch.FloatTensor
+    z_quantized: torch.FloatTensor
+    tokens: torch.LongTensor
+
+class OCTokenizerWithSeparatePos(OCTokenizer):
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: SpatialBroadcastDecoder, slot_attn: SlotAttentionSeparate, with_lpips: bool = True) -> None:
+        super().__init__(vocab_size, embed_dim, encoder, decoder, slot_attn, with_lpips)
+
+    def forward(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> Tuple[torch.Tensor]:
+        outputs = self.encode(x, should_preprocess)
+        decoder_input = outputs.z + (outputs.z_quantized - outputs.z).detach() * self.tau
+        reconstructions = self.decode(decoder_input, should_postprocess)
+        return outputs.z, outputs.z_quantized, reconstructions
+
+    def compute_loss(self, batch: Batch, **kwargs: Any) -> LossWithIntermediateLosses:
+        assert self.lpips is not None
+        observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
+        z, z_quantized, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
+
+        commitment_loss = self.quantizer.compute_loss(z, z_quantized) * self.tau
+        reconstruction_loss = torch.pow(observations - reconstructions, 2).mean()
+        if commitment_loss is None:
+            return LossWithIntermediateLosses(reconstruction_loss=reconstruction_loss)
+        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss)
+
+    def encode(self, x: torch.Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
+        if should_preprocess:
+            x = self.preprocess_input(x)
+        shape = x.shape  # (..., C, H, W)
+        x = x.view(-1, *shape[-3:])
+        z = self.encoder(x)
+        b, e, c = z.shape
+        z = rearrange(z, 'b e c -> b c e')
+        z, pos = self.slot_attn(z)
+        if self.pre_quant_conv is not None:
+            z = self.pre_quant_conv(z)
+        z_flattened = rearrange(z, 'b k (t e) -> (b k t) e', t=self.tokens_per_slot)
+
+        tokens, z_q = self.quantizer(z_flattened, self.tau)
+        z_q = rearrange(z_q, '(b k t) e -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot).contiguous()
+
+        z = rearrange(z, 'b k (t e) -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot)
+        pos = rearrange(pos, 'b k (t e) -> b e k t', b=b, k=self.num_slots, t=self.tokens_per_slot)
+        
+        # Reshape to original
+        z = z.reshape(*shape[:-3], *z.shape[1:])
+        pos = pos.reshape(*shape[:-3], *pos.shape[1:])
+        z_q = z_q.reshape(*shape[:-3], *z_q.shape[1:])
+        tokens = tokens.reshape(*shape[:-3], -1)
+
+        return TokenizerWithPosEncoderOutput(z, pos, z_q, tokens)
+
+    def decode(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
+        shape = z_q.shape  # (..., E, h, w)
+        z_q = z_q.view(-1, *shape[-3:])
+        if self.post_quant_conv is not None:
+            z_q = rearrange(z_q, 'b e k t -> b k t e', k=self.num_slots, t=self.tokens_per_slot)
+            z_q = self.post_quant_conv(z_q)
+            z_q = rearrange(z_q, 'b k t e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
+        rec = self.decoder(z_q)
+        rec = rec.reshape(*shape[:-3], *rec.shape[1:])
+        if should_postprocess:
+            rec = self.postprocess_output(rec)
+        return rec
+    
+    def decode_slots(self, z_q: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
+        shape = z_q.shape  # (..., E, h, w)
+        z_q = z_q.view(-1, *shape[-3:])
+        if self.post_quant_conv is not None:
+            z_q = rearrange(z_q, 'b e k t -> b k t e', k=self.num_slots, t=self.tokens_per_slot)
+            z_q = self.post_quant_conv(z_q)
+            z_q = rearrange(z_q, 'b k t e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
+        rec, color, mask = self.decoder(z_q, return_indiv_slots=True)
+        rec = rec.reshape(*shape[:-3], *rec.shape[1:])
+        color = color.reshape(*shape[:-3], *color.shape[1:])
+        mask = mask.reshape(*shape[:-3], *mask.shape[1:])
+        if should_postprocess:
+            rec = self.postprocess_output(rec)
+        return rec, color, mask
+
+    @torch.no_grad()
+    def encode_decode(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
+        z_q = self.encode(x, should_preprocess).z_quantized
+        return self.decode(z_q, should_postprocess)
+    
+    @torch.no_grad()
+    def encode_decode_slots(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False, use_hard: bool = False) -> torch.Tensor:
+        z_q = self.encode(x, should_preprocess).z
+        if use_hard:
+            z_q = self.encode(x, should_preprocess).z_quantized
+            # z_q = self.quantizer.get_embedding(self.encode(x, should_preprocess).tokens)
+            # z_q = rearrange(z_q, 'b (k t) e -> b e k t', k=self.num_slots, t=self.tokens_per_slot)
+        return self.decode_slots(z_q, should_postprocess)

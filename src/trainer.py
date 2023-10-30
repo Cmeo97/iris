@@ -11,7 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, StepLR
 from tqdm import tqdm
 import wandb
 
@@ -116,8 +116,15 @@ class Trainer:
             self.load_checkpoint()
 
     def run(self) -> None:
+        # for name, param in self.agent.tokenizer.quantizer.named_parameters():
+        #     print(name)
+        #     param.requires_grad = False
 
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
+            # if epoch > 200:
+            #     for name, param in self.agent.tokenizer.quantizer.named_parameters():
+            #         param.requires_grad = True
+            #     self.agent.tokenizer.tau = 1.0
 
             print(f"\nEpoch {epoch} / {self.cfg.common.epochs}\n")
             start_time = time.time()

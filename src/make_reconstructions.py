@@ -21,7 +21,7 @@ def make_reconstructions_from_batch(batch, save_dir, epoch, tokenizer):
     return
 
 @torch.no_grad()
-def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer):
+def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer, try_hard=True):
     # check_batch(batch)
 
     inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
@@ -33,6 +33,16 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
     masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
 
     save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch)
+
+    if try_hard:
+        outputs = reconstruct_through_tokenizer_with_slots(inputs, tokenizer, use_hard=True)
+        b, t, _, _, _ = batch['observations'].size()
+        recons, colors, masks = outputs
+        recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
+        colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
+        masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
+
+        save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch, suffix="hard")
 
 def save_image_with_slots(observations, recons, colors, masks, save_dir, epoch, suffix='sample'):
     b, t, _, _, _ = observations.size()
@@ -99,7 +109,7 @@ def generate_reconstructions_and_slots_with_tokenizer(batch, tokenizer):
 
 
 @torch.no_grad()
-def reconstruct_through_tokenizer_with_slots(inputs, tokenizer):
+def reconstruct_through_tokenizer_with_slots(inputs, tokenizer, use_hard=False):
     check_float_btw_0_1(inputs)
-    reconstructions, colors, masks = tokenizer.encode_decode_slots(inputs, should_preprocess=True, should_postprocess=True)
+    reconstructions, colors, masks = tokenizer.encode_decode_slots(inputs, should_preprocess=True, should_postprocess=True, use_hard=use_hard)
     return torch.clamp(reconstructions, 0, 1), colors, masks
