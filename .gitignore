@@ -137,3 +137,4 @@ dmypy.json
 
 clevr_robot_env/
 data/
+**.npy
