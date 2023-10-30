@@ -1,4 +1,4 @@
-from einops import rearrange
+from einops import rearrange, repeat
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -20,7 +20,7 @@ class SkipVQ(nn.Module): # For SlotAttention
     def compute_loss(self, z, z_quantized):
         return None
 
-    def forward(self, z):
+    def forward(self, z, tau=None):
         self.slot_repr = z.detach()
         return z, z
 
@@ -101,7 +101,7 @@ class dVAE(nn.Module):
 
         self.slot_targ = z.detach()
         self.slot_repr = z_q.detach()
-        return tokens, z_q
+        return tokens, z_q, self.post_vq_linear(z_hard)
 
     def _reset_count(self):
         self.ref_count = torch.zeros(self.vocab_size)
@@ -161,16 +161,19 @@ class BaseVQ(nn.Module):
         self.beta = beta
 
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        # self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+        self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
         # self.embedding.weight.data.normal_()
 
-        limit = np.sqrt(6.0 / (1 + tokens_per_slot * embed_dim))
-        mu = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit)
-        log_sigma = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit).exp()
-        init_codes = torch.normal(mu, log_sigma)
-        self.embedding.weight.data.copy_(init_codes)
+        # limit = np.sqrt(6.0 / (1 + tokens_per_slot * embed_dim))
+        # mu = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit)
+        # log_sigma = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit).exp()
+        # init_codes = torch.normal(mu, log_sigma)
+        # self.embedding.weight.data.copy_(init_codes)
 
-        self.ref_count = torch.zeros(vocab_size)
+        self.pre_quant_conv = nn.Linear(64, embed_dim)
+        self.post_quant_conv = nn.Linear(embed_dim, 64)
+
+        self.ref_count = torch.zeros(vocab_size*tokens_per_slot)
         self.ref_count_log = []
         self.save_count_every = 25
         self.save_after = 25
@@ -185,10 +188,16 @@ class BaseVQ(nn.Module):
 
         return commitment_loss
 
-    def forward(self, z):
+    def forward(self, z, tau=None):
+        z = self.pre_quant_conv(z)
+
         dist_to_embeddings = torch.sum(z ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z, self.embedding.weight.t())
         tokens = dist_to_embeddings.argmin(dim=-1)
+        # probabilities = F.softmax(-dist_to_embeddings / tau, dim=-1)
+        # tokens = probabilities.argmax(dim=-1)
         z_q = self.embedding(tokens)
+
+        z_q = self.post_quant_conv(z_q)
 
         tokens_onehot = F.one_hot(tokens, num_classes=self.vocab_size).float()
         if z.requires_grad: # during training
@@ -197,6 +206,13 @@ class BaseVQ(nn.Module):
 
         self.slot_repr = rearrange(z, '(b k t) e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot).detach()
         return tokens, z_q
+
+    def get_embedding(self, tokens):
+        # shape of tokens: (b k)
+        z_q = self.embedding(tokens)
+        z_q = self.post_quant_conv(z_q)
+
+        return z_q
 
     def _reset_count(self):
         self.ref_count = torch.zeros(self.vocab_size)
@@ -476,3 +492,473 @@ class VmfVQ(BaseVQ):
     def _set_temperature(self):
         self.temperature = np.max([1.0 * np.exp(-0.00001*self.step), 0.0])
         self.step += 1
+
+class PerceiverVQ(BaseVQ):
+    def __init__(self, vocab_size, embed_dim, num_slots, tokens_per_slot, beta):
+        super().__init__(vocab_size, embed_dim, num_slots, tokens_per_slot, beta)
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.num_slots = num_slots
+        self.tokens_per_slot = tokens_per_slot
+        self.beta = beta
+
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        # self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+        # self.embedding.weight.data.normal_()
+
+        self.scale = embed_dim**-0.5
+
+        self.to_q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.to_k = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.to_v = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.norm_slots = nn.LayerNorm(embed_dim, eps=0.001)
+        self.norm_embeds = nn.LayerNorm(embed_dim, eps=0.001)
+
+        self.ref_count = torch.zeros(vocab_size)
+        self.ref_count_log = []
+        self.save_count_every = 25
+        self.save_after = 25
+        self.slot_repr = None
+        self.pca = None
+
+    def compute_loss(self, z, z_quantized):
+        # Codebook loss. Notes:
+        # - beta position is different from taming and identical to original VQVAE paper
+        # - VQVAE uses 0.25 by default
+        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + self.beta * (z - z_quantized.detach()).pow(2).mean()
+
+        return commitment_loss
+
+    def forward(self, z, tau=None):
+        embedding = repeat(self.embedding.weight.data, 'n d -> b n d', b=z.shape[0])
+        embedding = self.norm_embeds(embedding)
+        q = self.to_q(embedding)
+
+        z = self.norm_slots(z)
+        k, v = self.to_k(z), self.to_v(z)
+
+        dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+        attn = dots.softmax(dim=-1)
+        tokens = attn.argmax(dim=1)
+        z_q = self.embedding(tokens)
+
+        tokens_onehot = F.one_hot(tokens.flatten().detach(), num_classes=self.vocab_size).float()
+        if z.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
+        self.slot_repr = z.detach()
+        return tokens, z_q
+
+
+class VQwithReparameterization(BaseVQ):
+    def __init__(self, vocab_size, embed_dim, num_slots, tokens_per_slot, beta):
+        super().__init__(vocab_size, embed_dim, num_slots, tokens_per_slot, beta)
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.num_slots = num_slots
+        self.tokens_per_slot = tokens_per_slot
+        self.beta = beta
+
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+        # self.embedding.weight.data.normal_()
+
+        # limit = np.sqrt(6.0 / (1 + tokens_per_slot * embed_dim))
+        # mu = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit)
+        # log_sigma = torch.rand((vocab_size, embed_dim)).uniform_(-limit, limit).exp()
+        # init_codes = torch.normal(mu, log_sigma)
+        # self.embedding.weight.data.copy_(init_codes)
+
+        self.pre_quant_conv_mu = nn.Linear(64, 64)
+        self.pre_quant_conv_sigma = nn.Linear(64, 64)
+        self.post_quant_conv = nn.Linear(64, 64)
+
+        self.ref_count = torch.zeros(vocab_size)
+        self.ref_count_log = []
+        self.save_count_every = 25
+        self.save_after = 25
+        self.slot_repr = None
+        self.pca = None
+
+    def compute_loss(self, z, z_quantized):
+        # Codebook loss. Notes:
+        # - beta position is different from taming and identical to original VQVAE paper
+        # - VQVAE uses 0.25 by default
+        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + self.beta * (z - z_quantized.detach()).pow(2).mean()
+
+        return commitment_loss + self.kl
+
+    def _sample_z(self, mean, std):
+        if mean.requires_grad:
+            epsilon = torch.randn(mean.shape).to(mean.device)
+            return mean + std * epsilon
+        else:
+            return mean
+
+    def torch_log(self, x):
+        return torch.log(torch.clamp(x, min=1e-10))
+
+    def forward(self, z, tau=None):
+        z_mu = self.pre_quant_conv_mu(z)
+        z_sigma = F.softplus(self.pre_quant_conv_sigma(z))
+        z = self._sample_z(z_mu, z_sigma)
+
+        self.kl = -0.5 * torch.mean(torch.sum(1 + self.torch_log(z_sigma**2) - z_mu**2 - z_sigma**2, dim=1))
+
+        dist_to_embeddings = torch.sum(z ** 2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * torch.matmul(z, self.embedding.weight.t())
+        tokens = dist_to_embeddings.argmin(dim=-1)
+        # probabilities = F.softmax(-dist_to_embeddings / tau, dim=-1)
+        # tokens = probabilities.argmax(dim=-1)
+        z_q = self.embedding(tokens)
+
+        z_q = self.post_quant_conv(z_q)
+
+        tokens_onehot = F.one_hot(tokens, num_classes=self.vocab_size).float()
+        if z.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
+        self.slot_repr = rearrange(z, '(b k t) e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot).detach()
+        return tokens, z_q
+
+
+class SlicedVQ(BaseVQ):
+    def __init__(self, vocab_size, embed_dim, num_slots, tokens_per_slot, beta):
+        super().__init__(vocab_size, embed_dim, num_slots, tokens_per_slot, beta)
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.num_slots = num_slots
+        self.tokens_per_slot = tokens_per_slot
+        self.beta = beta
+
+        self.embeddings = nn.ModuleList([])
+        for i in range(tokens_per_slot):
+            net = nn.Embedding(vocab_size, embed_dim)
+            net.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+            self.embeddings.append(net)
+
+        self.ref_count = torch.zeros(tokens_per_slot, vocab_size)
+        self.ref_count_log = []
+        self.save_count_every = 25
+        self.save_after = 25
+        self.slot_repr = None
+        self.pca = None
+
+    def compute_loss(self, z, z_quantized):
+        # Codebook loss. Notes:
+        # - beta position is different from taming and identical to original VQVAE paper
+        # - VQVAE uses 0.25 by default
+        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + self.beta * (z - z_quantized.detach()).pow(2).mean()
+
+        return commitment_loss
+
+    def forward(self, z, tau=None):
+        # shape of z: ((b k t) e)
+        # (b k t) e -> (b k) t e, then for loop over t
+        z = rearrange(z, '(b k t) e -> (b k) t e', k=self.num_slots, t=self.tokens_per_slot)
+        z = self.pre_quant_conv(z)
+        
+        z_q = []
+        tokens = []
+        tokens_onehot = []
+        for t in range(self.tokens_per_slot):
+            z_t = z[:, t, :]
+            dist_to_embeddings = torch.sum(z_t ** 2, dim=1, keepdim=True) + torch.sum(self.embeddings[t].weight**2, dim=1) - 2 * torch.matmul(z_t, self.embeddings[t].weight.t())
+            token = dist_to_embeddings.argmin(dim=-1)
+            z_q_t = self.embeddings[t](token)
+            z_q.append(z_q_t)
+            tokens.append(token)
+
+            token_onehot = F.one_hot(token, num_classes=self.vocab_size).float()
+            tokens_onehot.append(token_onehot)
+        z_q = torch.stack(z_q, dim=1)
+        tokens = torch.stack(tokens, dim=1).flatten(0,1)
+        tokens_onehot = torch.stack(tokens_onehot, dim=1)
+
+        z_q = rearrange(z_q, '(b k) t e -> (b k t) e', k=self.num_slots, t=self.tokens_per_slot)
+
+        if z.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
+        self.slot_repr = z.detach()
+        return tokens, z_q
+    
+    def get_embedding(self, tokens):
+        # shape of tokens: (b (k t))
+        tokens = rearrange(tokens, 'b (k t) -> (b k) t', k=self.num_slots, t=self.tokens_per_slot)
+        z_q = []
+        for t in range(self.tokens_per_slot):
+            z_q_t = self.embeddings[t](tokens[:, t])
+            z_q.append(z_q_t)
+        z_q = torch.stack(z_q, dim=1)
+        z_q = rearrange(z_q, '(b k) t e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot)
+
+        return z_q
+
+    def _reset_count(self):
+        self.ref_count = torch.zeros(self.tokens_per_slot, self.vocab_size)
+        self.ref_count_log = []
+        
+    def plot_count(self, epoch, save_dir):
+        self.ref_count_log.append(self.ref_count.numpy())
+        if epoch >= self.save_after and epoch % self.save_count_every == 0:
+            self.ref_count_log = np.array(self.ref_count_log)
+            plt.figure(figsize=(10,1))
+            for t in range(self.tokens_per_slot):
+                plt.subplot(1,2,t+1)
+                plt.imshow(self.ref_count_log[:, t])
+            plt.tight_layout()
+            plt.savefig(save_dir / f"ref_count_{epoch}.png")
+            plt.close()
+            self._reset_count()
+
+
+class BlockAttention(nn.Module):
+    def __init__(self, vocab_size, tokens_per_slot):
+        super().__init__()
+
+        self.vocab_size = vocab_size
+        self.tokens_per_slot = tokens_per_slot
+
+    def forward(self, q, k, v):
+        """
+        q: (bs,k,t,d), k/v: (bs,vocab_size,t,d), attn: (bs,t,k,vocab_size)
+        return: out (bs,k,t,d), tokens (bs,k,t)
+        """
+        bs, K = q.shape[:2]
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        q = q * (q.shape[-1] ** (-0.5))
+        attn = torch.matmul(q, k.transpose(-1, -2))
+        attn = F.softmax(attn, dim=-1)
+
+        tokens = []
+        for t in range(self.tokens_per_slot):
+            token = attn[:, t].argmax(dim=-1)
+            tokens.append(token)
+        tokens = torch.stack(tokens, dim=-1)
+
+        output = torch.matmul(attn, v).transpose(1, 2)
+
+        return output, tokens
+
+
+class BinderQuantization(BaseVQ):
+    def __init__(self, vocab_size, embed_dim, num_slots, tokens_per_slot, beta):
+        super().__init__(vocab_size, embed_dim, num_slots, tokens_per_slot, beta)
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.num_slots = num_slots
+        self.tokens_per_slot = tokens_per_slot
+        self.beta = beta
+        
+        # block prototype memory
+        self.embeddings = nn.Parameter(torch.zeros(1, vocab_size, tokens_per_slot, self.embed_dim), requires_grad=True)
+        nn.init.trunc_normal_(self.embeddings)
+        self.mem_proj = nn.Sequential(
+            nn.Linear(self.embed_dim, 4 * self.embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(4 * self.embed_dim, 4 * self.embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(4 * self.embed_dim, 4 * self.embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(4 * self.embed_dim, self.embed_dim)
+        )
+
+        # norms
+        self.norm_mem = nn.LayerNorm(self.embed_dim, elementwise_affine=False)
+        self.norm_query = nn.LayerNorm(self.embed_dim, elementwise_affine=False)
+
+        # block attention
+        self.attn = BlockAttention(vocab_size, tokens_per_slot)
+
+        self.ref_count = torch.zeros(tokens_per_slot, vocab_size)
+        self.ref_count_log = []
+        self.save_count_every = 25
+        self.save_after = 25
+        self.slot_repr = None
+        self.pca = None
+
+    def compute_loss(self, z, z_quantized):
+        # Codebook loss. Notes:
+        # - beta position is different from taming and identical to original VQVAE paper
+        # - VQVAE uses 0.25 by default
+        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + self.beta * (z - z_quantized.detach()).pow(2).mean()
+
+        return commitment_loss
+
+    def forward(self, z, tau=None):
+        z = rearrange(z, '(b k t) e -> b k t e', k=self.num_slots, t=self.tokens_per_slot)
+
+        # get memories
+        mem = self.mem_proj(self.embeddings)  # (1,vocab_size,tokens_per_slot,embed_dim)
+
+        # norms
+        mem = self.norm_mem(mem)  # (1,vocab_size,tokens_per_slot,embed_dim)
+        queries = self.norm_query(z)  # (bs,num_slots,tokens_per_slot,embed_dim)
+
+        # broadcast
+        mem = mem.expand(z.shape[0], -1, -1, -1)  # (bs,num_prototypes,tokens_per_slot,embed_dim)
+
+        # read
+        z_q, tokens = self.attn(queries, mem, mem)  # (bs,num_slots,tokens_per_slot,embed_dim), (bs,num_slots,tokens_per_slot)
+
+        tokens_onehot = []
+        for t in range(self.tokens_per_slot):
+            token = tokens[:, :, t].flatten(0, 1)
+            token_onehot = F.one_hot(token, num_classes=self.vocab_size).float()
+            tokens_onehot.append(token_onehot)
+        tokens_onehot = torch.stack(tokens_onehot, dim=1)
+        if z.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
+        self.slot_repr = rearrange(z, 'b k t e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot).detach()
+
+        z_q = rearrange(z_q, 'b k t e -> (b k t) e', k=self.num_slots, t=self.tokens_per_slot)
+        tokens = rearrange(tokens, 'b k t -> (b k t)', k=self.num_slots, t=self.tokens_per_slot)
+
+        return tokens, z_q
+    
+    def get_embedding(self, tokens):
+        # shape of tokens: (b (k t))
+        tokens = rearrange(tokens, 'b (k t) -> (b k) t', k=self.num_slots, t=self.tokens_per_slot)
+        
+        z_q = []
+        for t in range(self.tokens_per_slot):
+            z_q_t = self.embeddings[0, tokens[:, t], t]
+            z_q.append(z_q_t)
+        z_q = torch.stack(z_q, dim=1)
+        z_q = rearrange(z_q, '(b k) t e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot)
+
+        return z_q
+    
+    def _reset_count(self):
+        self.ref_count = torch.zeros(self.tokens_per_slot, self.vocab_size)
+        self.ref_count_log = []
+        
+    def plot_count(self, epoch, save_dir):
+        self.ref_count_log.append(self.ref_count.numpy())
+        if epoch >= self.save_after and epoch % self.save_count_every == 0:
+            self.ref_count_log = np.array(self.ref_count_log)
+            plt.figure(figsize=(10,1))
+            for t in range(self.tokens_per_slot):
+                plt.subplot(1,2,t+1)
+                plt.imshow(self.ref_count_log[:, t])
+            plt.tight_layout()
+            plt.savefig(save_dir / f"ref_count_{epoch}.png")
+            plt.close()
+            self._reset_count()
+
+
+class SlicedPerceiverVQ(BaseVQ):
+    def __init__(self, vocab_size, embed_dim, num_slots, tokens_per_slot, beta):
+        super().__init__(vocab_size, embed_dim, num_slots, tokens_per_slot, beta)
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.num_slots = num_slots
+        self.tokens_per_slot = tokens_per_slot
+        self.beta = beta
+
+        self.embeddings = nn.ModuleList([])
+        for i in range(tokens_per_slot):
+            net = nn.Embedding(vocab_size, embed_dim)
+            net.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
+            self.embeddings.append(net)
+
+        self.scale = embed_dim**-0.5
+
+        self.to_q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.to_k = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.norm_slots = nn.LayerNorm(embed_dim, eps=0.001)
+        self.norm_embeds = nn.LayerNorm(embed_dim, eps=0.001)
+
+        self.ref_count = torch.zeros(tokens_per_slot, vocab_size)
+        self.ref_count_log = []
+        self.save_count_every = 25
+        self.save_after = 25
+        self.slot_repr = None
+        self.pca = None
+
+    def compute_loss(self, z, z_quantized):
+        # Codebook loss. Notes:
+        # - beta position is different from taming and identical to original VQVAE paper
+        # - VQVAE uses 0.25 by default
+        commitment_loss = (z.detach() - z_quantized).pow(2).mean() + self.beta * (z - z_quantized.detach()).pow(2).mean()
+
+        return commitment_loss
+
+    def forward(self, z, tau=None):
+        # shape of z: ((b k t) e)
+        # (b k t) e -> (b k) t e, then for loop over t
+        z = rearrange(z, '(b k t) e -> (b k) t e', k=self.num_slots, t=self.tokens_per_slot)
+        z = self.norm_slots(z)
+        k = self.to_k(z)
+        
+        z_q = []
+        tokens = []
+        tokens_onehot = []
+        for t in range(self.tokens_per_slot):
+            k_t = k[:, t, :].unsqueeze(1)
+
+            embedding = repeat(self.embeddings[t].weight.data, 'n d -> b n d', b=z.shape[0])
+            embedding = self.norm_embeds(embedding)
+            q_t = self.to_q(embedding)
+
+            dots = torch.einsum("bid,bjd->bij", q_t, k_t) * self.scale
+            attn = dots.softmax(dim=-1)
+            token = attn.argmax(dim=1).squeeze(1)
+            z_q_t = self.embeddings[t](token)
+            z_q.append(z_q_t)
+            tokens.append(token)
+
+            token_onehot = F.one_hot(token, num_classes=self.vocab_size).float()
+            tokens_onehot.append(token_onehot)
+        z_q = torch.stack(z_q, dim=1)
+        tokens = torch.stack(tokens, dim=1).flatten(0,1)
+        tokens_onehot = torch.stack(tokens_onehot, dim=1)
+
+        z_q = rearrange(z_q, '(b k) t e -> (b k t) e', k=self.num_slots, t=self.tokens_per_slot)
+
+        if z.requires_grad: # during training
+            ref_count = torch.sum(tokens_onehot, dim=0)
+            self.ref_count += ref_count.detach().cpu()
+
+        self.slot_repr = z.detach()
+        return tokens, z_q
+    
+    def get_embedding(self, tokens):
+        # shape of tokens: (b (k t))
+        tokens = rearrange(tokens, 'b (k t) -> (b k) t', k=self.num_slots, t=self.tokens_per_slot)
+        z_q = []
+        for t in range(self.tokens_per_slot):
+            z_q_t = self.embeddings[t](tokens[:, t])
+            z_q.append(z_q_t)
+        z_q = torch.stack(z_q, dim=1)
+        z_q = rearrange(z_q, '(b k) t e -> b (k t) e', k=self.num_slots, t=self.tokens_per_slot)
+
+        return z_q
+
+    def _reset_count(self):
+        self.ref_count = torch.zeros(self.tokens_per_slot, self.vocab_size)
+        self.ref_count_log = []
+
+    def plot_count(self, epoch, save_dir):
+        self.ref_count_log.append(self.ref_count.numpy())
+        if epoch >= self.save_after and epoch % self.save_count_every == 0:
+            self.ref_count_log = np.array(self.ref_count_log)
+            plt.figure(figsize=(10,1))
+            for t in range(self.tokens_per_slot):
+                plt.subplot(1,2,t+1)
+                plt.imshow(self.ref_count_log[:, t])
+            plt.tight_layout()
+            plt.savefig(save_dir / f"ref_count_{epoch}.png")
+            plt.close()
+            self._reset_count()
