@@ -192,7 +192,7 @@ class OCWorldModel(WorldModel):
         prev_steps = 0 if past_keys_values is None else past_keys_values.size
 
         spatial_emb = self.spatial_pos_emb(torch.arange(self.tokens_per_block, device=tokens.device)).repeat(self.max_blocks, 1)[:num_steps]
-        sequences = self.embedder(tokens, num_steps, prev_steps) + self.pos_emb(prev_steps + torch.arange(num_steps, device=tokens.device)) + spatial_emb
+        sequences = self.embedder(tokens, num_steps, prev_steps) + self.pos_emb(prev_steps + torch.arange(num_steps, device=tokens.device)) #+ spatial_emb
 
         x = self.transformer(sequences, past_keys_values)
 
@@ -230,17 +230,17 @@ class OCWorldModel(WorldModel):
         loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
 
         # additional reconstruction loss
-        next_observations = batch['observations'][:, 1:]
-        next_logits_observations = rearrange(outputs.logits_observations[:, tokenizer.num_slots*tokenizer.tokens_per_slot:], 'b t o -> (b t) o')
-        z_q = tokenizer.decode_logits(next_logits_observations)
-        z_q = rearrange(z_q, '(b l k t) e -> b l e k t', b=bs, k=tokenizer.num_slots, t=tokenizer.tokens_per_slot)
-        reconstructions = tokenizer.decode(z_q)
-        reconstruction_loss = torch.pow(next_observations - reconstructions, 2).mean()
+        # next_observations = batch['observations'][:, 1:]
+        # next_logits_observations = rearrange(outputs.logits_observations[:, tokenizer.num_slots*tokenizer.tokens_per_slot:], 'b t o -> (b t) o')
+        # z_q = tokenizer.decode_logits(next_logits_observations)
+        # z_q = rearrange(z_q, '(b l k t) e -> b l e k t', b=bs, k=tokenizer.num_slots, t=tokenizer.tokens_per_slot)
+        # reconstructions = tokenizer.decode(z_q)
+        # reconstruction_loss = torch.pow(next_observations - reconstructions, 2).mean()
 
         if self.act_vocab_size == 0:
             return LossWithIntermediateLosses(loss_obs=loss_obs)
-        # return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
-        return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)
+        return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
+        # return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, reconstruction_loss=reconstruction_loss)
 
     def _reset_count(self):
         self.ref_count = torch.zeros(self.obs_vocab_size)
