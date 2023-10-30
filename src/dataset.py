@@ -122,6 +122,14 @@ class EpisodesDataset:
             self.episode_id_to_queue_idx[episode_id] = len(self.episodes)
             self.episodes.append(episode)
 
+    def save_episodes(self, directory: Path) -> None:
+        # append all episodes to list
+        observations = []
+        for episode_id in range(self.num_seen_episodes):
+            observations.append(self.get_episode(episode_id).observations)
+        observations = torch.cat(observations, dim=0)
+        print(observations.min(), observations.max(), type(observations))
+        torch.save(observations, directory / 'observations.pt')
 
 class EpisodesDatasetRamMonitoring(EpisodesDataset):
     """
