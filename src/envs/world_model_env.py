@@ -44,7 +44,7 @@ class WorldModelEnv:
 
         _ = self.refresh_keys_values_with_initial_obs_tokens(obs_tokens)
         self.obs_tokens = obs_tokens
-        self.obs_logits = self.tokenizer.encode_logits(outputs.z)
+        # self.obs_logits = self.tokenizer.encode_logits(outputs.z) # need to use logits instead of tokens when using dVAE
 
         rec, _, _ = self.decode_obs_tokens()
         return rec
@@ -91,7 +91,7 @@ class WorldModelEnv:
                 obs_tokens.append(token)
 
         output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-        self.obs_logits = torch.cat(obs_logits, dim=1)        # (B, K, E)
+        # self.obs_logits = torch.cat(obs_logits, dim=1)        # (B, K, E), need to use logits instead of tokens when using dVAE
         self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
         if should_predict_next_obs:
@@ -112,7 +112,8 @@ class WorldModelEnv:
     def decode_obs_tokens(self) -> List[Image.Image]:
         color, mask = None, None
         if self.slot_based:
-            embedded_tokens = self.tokenizer.decode_logits(self.obs_logits)     # (B, K, E)
+            # embedded_tokens = self.tokenizer.decode_logits(self.obs_logits)     # (B, K, E) if using dVAE
+            embedded_tokens = self.tokenizer.quantizer.get_embedding(self.obs_tokens)     # (B, K, E) if using VQVAE-based
             z = rearrange(embedded_tokens, 'b (k t) e -> b e k t', k=self.tokenizer.num_slots, t=self.tokenizer.tokens_per_slot)
             rec, color, mask = self.tokenizer.decode_slots(z, should_postprocess=True)         # (B, C, H, W)
         else:
