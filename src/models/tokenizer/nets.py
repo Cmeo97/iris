@@ -762,3 +762,132 @@ class SlotAttention(nn.Module):
             slots = (slots + self.mlp(self.norm_pre_ff(slots)))
 
         return slots
+
+class SlotAttentionSeparate(nn.Module):
+    def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
+        super().__init__()
+        assert config.slot_dim % config.tokens_per_slot == 0
+        self.config = config
+        self.num_slots = config.num_slots
+        self.tokens_per_slot = config.tokens_per_slot
+        self.iters = config.iters
+        self.eps = eps
+        self.scale = config.slot_dim**-0.5
+
+        self.slots_mu = nn.Parameter(torch.rand(1, 1, config.slot_dim))
+        self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, config.slot_dim))
+        self.slots_pos_mu = nn.Parameter(torch.rand(1, 1, config.slot_dim))
+        self.slots_pos_log_sigma = nn.Parameter(torch.randn(1, 1, config.slot_dim))
+        with torch.no_grad():
+            limit = sqrt(6.0 / (1 + config.slot_dim))
+            torch.nn.init.uniform_(self.slots_mu, -limit, limit)
+            torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
+            torch.nn.init.uniform_(self.slots_pos_mu, -limit, limit)
+            torch.nn.init.uniform_(self.slots_pos_log_sigma, -limit, limit)
+
+        self.to_q = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
+        self.to_qpos = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
+        self.to_k = nn.Linear(config.channels_enc, config.slot_dim*2, bias=False)
+        self.to_v = nn.Linear(config.channels_enc, config.slot_dim*2, bias=False)
+
+        self.gru = nn.GRUCell(config.slot_dim, config.slot_dim)
+        self.gru_pos = nn.GRUCell(config.slot_dim, config.slot_dim)
+
+        hidden_dim = max(config.slot_dim, hidden_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(config.slot_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, config.slot_dim),
+        )
+        self.mlp_pos = nn.Sequential(
+            nn.Linear(config.slot_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, config.slot_dim),
+        )
+
+        self.norm_input = nn.LayerNorm(config.channels_enc, eps=0.001)
+        self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.slot_dim = config.slot_dim
+        
+        self._init_params()
+
+    def _init_params(self):
+        for name, tensor in self.named_parameters():
+            if name.endswith(".bias"):
+                torch.nn.init.zeros_(tensor)
+            elif len(tensor.shape) <= 1:
+                pass  # silent
+            else:
+                nn.init.xavier_uniform_(tensor)
+        torch.nn.init.zeros_(self.gru.bias_ih)
+        torch.nn.init.zeros_(self.gru.bias_hh)
+        torch.nn.init.orthogonal_(self.gru.weight_hh)
+        torch.nn.init.zeros_(self.gru_pos.bias_ih)
+        torch.nn.init.zeros_(self.gru_pos.bias_hh)
+        torch.nn.init.orthogonal_(self.gru_pos.weight_hh)
+
+    def forward(self, inputs: torch.Tensor, num_slots: Optional[int] = None) -> torch.Tensor:
+        b, n, d = inputs.shape
+        if num_slots is None:
+            num_slots = self.num_slots
+
+        mu = self.slots_mu.expand(b, num_slots, -1)
+        sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
+        slots = torch.normal(mu, sigma)
+
+        mu_pos = self.slots_pos_mu.expand(b, num_slots, -1)
+        sigma_pos = self.slots_pos_log_sigma.expand(b, num_slots, -1).exp()
+        pos = torch.normal(mu_pos, sigma_pos)
+
+        inputs = self.norm_input(inputs)
+        k, k_pos = self.to_k(inputs).chunk(2, dim=-1) 
+        v, v_pos = self.to_v(inputs).chunk(2, dim=-1)
+
+        for _ in range(self.iters):
+            slots_prev = slots
+            pos_prev = pos
+
+            # slots
+            slots = self.norm_slots(slots)
+            q = self.to_q(slots)
+
+            dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
+            attn = dots.softmax(dim=1) + self.eps
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+
+            updates = torch.einsum("bjd,bij->bid", v, attn)
+
+            ##########
+            # pos
+            pos = self.norm_slots(pos)
+            qpos = self.to_qpos(pos)
+
+            dots_pos = torch.einsum("bid,bjd->bij", qpos, k_pos) * self.scale
+            attn_pos = dots_pos.softmax(dim=1) + self.eps
+            attn_pos = attn_pos / attn_pos.sum(dim=-1, keepdim=True)
+
+            updates_pos = torch.einsum("bjd,bij->bid", v_pos, attn_pos)
+
+            updates = updates + updates_pos # "positional embedding" to slots
+            ##########
+
+            slots = self.gru(
+                updates.reshape(-1, self.slot_dim), slots_prev.reshape(-1, self.slot_dim)
+            )
+
+            slots = slots.reshape(b, -1, self.slot_dim)
+            slots = (slots + self.mlp(self.norm_pre_ff(slots)))
+
+            ##########
+            # pos
+            pos = self.gru_pos(
+                updates_pos.reshape(-1, self.slot_dim), pos_prev.reshape(-1, self.slot_dim)
+            )
+
+            pos = pos.reshape(b, -1, self.slot_dim)
+            pos = (pos + self.mlp_pos(self.norm_pre_ff(pos)))
+            ##########
+
+        return slots, pos
