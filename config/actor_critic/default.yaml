@@ -1,1 +1,2 @@
 use_original_obs: False
+latent_actor: False

@@ -21,6 +21,7 @@ class WorldModelOutput:
     logits_observations: torch.FloatTensor
     logits_rewards: torch.FloatTensor
     logits_ends: torch.FloatTensor
+    mems: torch.FloatTensor
 
 @dataclass
 class ContinuosWorldModelOutput:
@@ -182,10 +183,13 @@ class WorldModel(nn.Module):
     def __repr__(self) -> str:
         return "world_model"
 
-    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None) -> WorldModelOutput:
+    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None, mems: Optional[list] = None) -> WorldModelOutput:
 
         if self.config.model == 'iris':
-            tokens = inputs['tokens']
+            if isinstance(inputs, torch.cuda.LongTensor):
+                tokens = inputs
+            else:
+                tokens = inputs['tokens']
             num_steps = tokens.size(1)  # (B, T)
             assert num_steps <= self.config.max_tokens
             prev_steps = 0 if past_keys_values is None else past_keys_values.size
@@ -198,28 +202,32 @@ class WorldModel(nn.Module):
             logits_rewards = self.head_rewards(x, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
 
-            return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends)
+            return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends, None)
 
         elif self.config.model == 'irisXL-discrete' or self.config.model == 'irisXL-continuos':
 
-            num_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1)  # (B, L, T) -> L*(T+1), 1 for action token
+            if inputs['z'].size(1) == 1:
+                num_steps = 1
+            else:
+                num_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1)  # (B, L, T) -> L*(T+1), 1 for action token
       
             assert num_steps <= self.config.max_tokens
             prev_steps = 0 if past_keys_values is None else past_keys_values.size
-            if past_keys_values is not None and 'a' not in inputs.keys():
+            if mems is not None and 'a' not in inputs.keys():
                 inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
-                num_steps -= 1 # remove action token step
+                prev_steps = 16 #num of obs tokens
+              
 
             tgt_length = inputs.pop('tgt_length') if 'tgt_length' in inputs.keys() else inputs['z'].size(1)
             stop_mask = inputs.pop('stop_mask') if 'stop_mask' in inputs.keys() else torch.zeros(inputs['z'].shape[:2], device=inputs['z'].device)
             
-            h, _ = self.transformer(inputs, tgt_length, stop_mask)
+            h, mems = self.transformer(inputs, tgt_length, stop_mask)
 
             logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
             if self.config.model == 'irisXL-discrete':
                 logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
-                return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends)
+                return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends, mems)
             else:
                 encodings = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
                 return ContinuosWorldModelOutput(h, encodings, logits_rewards, logits_ends)

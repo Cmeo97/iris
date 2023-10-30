@@ -6,6 +6,10 @@ defaults:
   - env: default
   - datasets: default
 
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
 wandb:
   mode: online
   project: IRIS
@@ -23,7 +27,7 @@ initialization:
 
 common:
   epochs: 600
-  device: cuda:2
+  device: cuda:6
   do_checkpoint: True
   seed: 0
   sequence_length: ${world_model.max_blocks}
@@ -58,21 +62,21 @@ training:
     batch_num_samples: 256
     grad_acc_steps: 1
     max_grad_norm: 10.0
-    start_after_epochs: 0
-    steps_per_epoch: 1
+    start_after_epochs: 5
+    steps_per_epoch: 200
   world_model:
     batch_num_samples: 64
     grad_acc_steps: 1
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 0
-    steps_per_epoch: 2
+    start_after_epochs: 25
+    steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 64
     grad_acc_steps: 1
     max_grad_norm: 10.0
-    start_after_epochs: 0
-    steps_per_epoch: 2
+    start_after_epochs: 50
+    steps_per_epoch: 200
     imagine_horizon: ${common.sequence_length}
     burn_in: 20
     gamma: 0.995

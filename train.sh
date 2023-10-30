@@ -4,10 +4,10 @@ conda activate iris
 
 task=BoxingNoFrameskip-v4 
 
-seed=1
+seed=0
 
 
-exp_name='vanilla-iris-'${task}'-'${seed}
+exp_name='irisXL-discrete-'${task}'-'${seed}
 
 
 nohup python src/main.py env.train.id=${task} wandb.name=${exp_name} common.seed=${seed} \

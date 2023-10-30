@@ -263,9 +263,6 @@ class TransformerXL(nn.Module):
         src_mask[idx] = True
         return src_mask
     
-    def generate_empty_keys_values(self, n: int, max_tokens: int) -> KeysValues:
-        device = self.transformer.u_bias.device  # Assumption that all submodules are on the same device
-        return KeysValues(n, self.num_heads, max_tokens, self.embed_dim, self.num_layers, device)
 
     def forward(self, embeds, tgt_length, stop_mask, mems=None, return_attention=False):
 
@@ -276,7 +273,7 @@ class TransformerXL(nn.Module):
             return m_xs.reshape(batch_size, seq_len * (num_tokens+1), dim)
 
         if 'a' not in embeds.keys():
-            self.num_current= self.num_tokens - 1 # remove the action token 
+            self.num_current = embeds['z'].shape[1]  # remove the action token 
         else:
             self.num_current = self.num_tokens
         

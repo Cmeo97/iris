@@ -81,7 +81,7 @@ class Trainer:
 
         tokenizer = instantiate(cfg.tokenizer)
         world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
-        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions)
+        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model)
         self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
         print(f'{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model')
