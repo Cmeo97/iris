@@ -179,23 +179,28 @@ class ActorCritic(nn.Module):
             self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1])
         if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
             embedder = wm_env.world_model.embedder['z'].eval()
+            mems = wm_env.world_model.transformer.transformer.init_mems()  # Memory Initialization 
         else:
             embedder = wm_env.world_model.embedder.embedding_tables[1].eval()
+            mems = None
         obs, obs_tokens = wm_env.reset_from_initial_observations(initial_observations[:, -1])
+        
+        stop_mask = torch.zeros((obs_tokens.shape[0], 1), device=obs_tokens.device) # Stop Mask initialization
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Imagination', file=sys.stdout):
         
             all_observations.append(obs)
             all_tokens_observations.append(obs_tokens)
-
+            
             outputs_ac =  self(embedder(obs_tokens)) if self.latent_actor else self(obs) 
             action_token = Categorical(logits=outputs_ac.logits_actions).sample()
-            obs, reward, done, _, obs_tokens = wm_env.step(action_token, should_predict_next_obs=(k < horizon - 1))
+            obs, reward, done, mems, obs_tokens = wm_env.step(action_token, mems, should_predict_next_obs=(k < horizon - 1), stop_mask=stop_mask)
 
             all_actions.append(action_token)
             all_logits_actions.append(outputs_ac.logits_actions)
             all_values.append(outputs_ac.means_values)
             all_rewards.append(torch.tensor(reward).reshape(-1, 1))
             all_ends.append(torch.tensor(done).reshape(-1, 1))
+            stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
 
         self.clear()
         return ImagineOutput(

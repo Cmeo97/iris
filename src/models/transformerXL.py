@@ -66,14 +66,13 @@ class TransformerXLDecoder(nn.Module):
 
         assert len(hiddens) == len(mems)
         with torch.no_grad():
-            new_mems = []
             for i in range(len(hiddens)):
-                cat = torch.cat([mems[i], hiddens[i]], dim=0)
-                new_mems.append(cat[-self.mem_length:].detach())
+                mems[i] = torch.cat([mems[i], hiddens[i]], dim=0)[-self.mem_length:]
+             
         if return_attention:
             attention = torch.stack(attentions, dim=-2)
-            return out, new_mems, attention
-        return out, new_mems
+            return out, mems, attention
+        return out, mems
 
 
 class TransformerXLDecoderLayer(nn.Module):
@@ -197,14 +196,13 @@ class PositionalEncoding(nn.Module):
 
 class TransformerXL(nn.Module):
 
-    def __init__(self, modality_order, num_current, embeds, embed_dim, activation, norm, dropout_p,
+    def __init__(self, modality_order, num_tokens, embed_dim, activation, dropout_p,
                  feedforward_dim, head_dim, num_heads, num_layers, memory_length, max_length):
         super().__init__()
         self.embed_dim = embed_dim
         self.memory_length = memory_length
         self.modality_order = tuple(modality_order)
-        self.num_current = num_current
-        self.num_tokens = num_current
+        self.num_tokens = num_tokens # obs_tokens + action_tokens = 17
         self.num_heads = num_heads
         self.num_layers = num_layers
         
@@ -212,33 +210,30 @@ class TransformerXL(nn.Module):
             embed_dim, feedforward_dim, head_dim, num_heads, activation, dropout_p)
 
         num_modalities = len(modality_order)
-        max_length = max_length * num_modalities + self.num_current
-        mem_length = memory_length * num_modalities + self.num_current
+        max_length = max_length * num_modalities + num_tokens 
+        mem_length = memory_length 
         self.transformer = TransformerXLDecoder(decoder_layer, num_layers, max_length, mem_length, batch_first=True)
 
 
     @lru_cache(maxsize=20)
-    def _get_base_mask(self, src_length, tgt_length, device):
+    def _get_base_mask(self, src_length, tgt_length, device,  num_current_tokens):
         src_mask = torch.ones(tgt_length, src_length, dtype=torch.bool, device=device)
         num_modalities = len(self.modality_order)
         for tgt_index in range(tgt_length):
             # the last indices are always 'current'
-            start_index = src_length - self.num_current
+            start_index = src_length - num_current_tokens
             src_index = src_length - tgt_length + tgt_index
             modality_index = (src_index - start_index) % num_modalities
-            if modality_index < self.num_current:
+            if modality_index <  num_current_tokens:
                 start = max(src_index - (self.memory_length + 1) * num_modalities, 0)
             else:
                 start = max(src_index - modality_index - self.memory_length * num_modalities, 0)
             src_mask[tgt_index, start:src_index + 1] = False
         return src_mask
 
-    def _get_mask(self, src_length, tgt_length, device, stop_mask):
+    def _get_mask(self, src_length, tgt_length, device, stop_mask, num_current_tokens, mem_num_tokens=0):
 
-        # prevent attention over episode ends using stop_mask
-        #assert stop_mask.shape[1] * (self.num_tokens - 1) + (self.num_tokens - 1) == src_length
-
-        src_mask = self._get_base_mask(src_length, tgt_length, device)
+        src_mask = self._get_base_mask(src_length, tgt_length, device, num_current_tokens)
 
         batch_size, seq_length = stop_mask.shape
         stop_mask = stop_mask.t()
@@ -253,11 +248,13 @@ class TransformerXL(nn.Module):
         tgt = torch.logical_and(stop_mask_shift_right.unsqueeze(1), shifted_tril.unsqueeze(-1))
         tgt = torch.cummax(tgt, dim=0).values
 
-        idx = torch.logical_and(src, tgt)[:-1, :-1] # remove extra dimension 
+        idx = torch.logical_and(tgt, src)[:-1, :-1] # remove extra dimensions 
 
         i, j, k = idx.shape 
-        idx = idx.reshape(i, 1, j, 1, k).expand(i, (self.num_current), j, (self.num_current), k) \
-            .reshape(i * (self.num_current), j * (self.num_current), k)
+        idx = idx.reshape(i, 1, j, 1, k).expand(i, (num_current_tokens + mem_num_tokens), j, (num_current_tokens + mem_num_tokens), k) \
+            .reshape(i * (num_current_tokens + mem_num_tokens), j * (num_current_tokens + mem_num_tokens), k)
+        
+        idx = idx[-tgt_length:, -src_length:]
 
         src_mask = src_mask.unsqueeze(-1).tile(1, 1, batch_size)
         src_mask[idx] = True
@@ -273,49 +270,38 @@ class TransformerXL(nn.Module):
             return m_xs.reshape(batch_size, seq_len * (num_tokens+1), dim)
 
         if 'a' not in embeds.keys():
-            self.num_current = embeds['z'].shape[1]  # remove the action token 
+            num_current_tokens = embeds['z'].shape[1]   # z tokens + mems tokens
         else:
-            self.num_current = self.num_tokens
+            num_current_tokens = embeds['z'].shape[2] + embeds['a'].unsqueeze(2).shape[2]
         
         if mems is None:
             history_length = embeds[self.modality_order[0]].shape[1] - 1  # assuming dim is (B, L, T, embed_dim (or encodings_dim if continuos Tf_XL))
             if 'a' not in embeds.keys():
                 inputs = rearrange(embeds['z'], 'b l t e -> b (l t) e')
-            elif self.num_tokens == self.num_current:
+            elif self.num_tokens ==  num_current_tokens:
                 inputs = cat_modalities([embeds[name] for name in self.modality_order]) # (B, L*num_modalities, dim) , modalities = [z, a], num_modalities = 2
             else:
                 history = cat_modalities([embeds[name][:, :history_length] for name in self.modality_order]) # (B, L*num_modalities, dim) , modalities = [z, a], num_modalities = 2
-                current = cat_modalities([embeds[name][:, history_length:] for name in self.modality_order[:self.num_current]])
+                current = cat_modalities([embeds[name][:, history_length:] for name in self.modality_order[:num_current_tokens]])
                 inputs = torch.cat([history, current], dim=1)
-            tgt_length = (tgt_length - 1) * self.num_tokens + self.num_current 
-            src_length = history_length * self.num_tokens + self.num_current
+            tgt_length = (tgt_length - 1) * num_current_tokens + num_current_tokens
+            src_length = history_length * num_current_tokens + num_current_tokens
             assert inputs.shape[1] == src_length 
-            src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask)
+            src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask, num_current_tokens)
         else:
             sequence_length = embeds['z'].shape[1] # assuming dim is (B, L, embed_dim (or encodings_dim if continuos Tf_XL))
             # switch order so that 'currents' are last
-            inputs = cat_modalities(
-                [embeds[name] for name in (self.modality_order[self.num_current:] + self.modality_order[:self.num_current])])
-            tgt_length = tgt_length * self.num_tokens
-            mem_length = mems[0].shape[0]
-            src_length = mem_length + sequence_length * self.num_tokens
-            src_mask = self._get_mask(src_length, tgt_length, inputs.device, stop_mask) # (num_tokens * inner_sequence, num_tokens * inner_sequence, batch)
+            #inputs = cat_modalities(
+            #    [embeds[name] for name in (self.modality_order[num_current_tokens:] + self.modality_order[:num_current_tokens])])
+            inputs = embeds['z']
+            tgt_length = tgt_length * num_current_tokens
+            mem_num_tokens = mems[0].shape[0]
+            src_length = mem_num_tokens + sequence_length * num_current_tokens
+            src_mask = self._get_mask(src_length, tgt_length, inputs.device, stop_mask, num_current_tokens, mem_num_tokens) # (num_tokens * inner_sequence, num_tokens * inner_sequence, batch)
 
         positions = torch.arange(src_length - 1, -1, -1, device=inputs.device) # num_tokens * inner_sequence
         outputs = self.transformer(
             inputs, positions, attn_mask=src_mask, mems=mems, tgt_length=tgt_length, return_attention=return_attention)
         hiddens, mems, attention = outputs if return_attention else (outputs + (None,))
-
-        # take outputs at last current
-        assert hiddens.shape[1] == tgt_length
-        #out_idx = torch.arange(tgt_length - 1, -1, - self.num_tokens, device=inputs.device).flip([0])
-        #hiddens = hiddens[:, out_idx]
-        #if return_attention:
-        #    attention = attention[out_idx]
-
-        #if heads is None:
-        #    heads = self.out_heads.keys()
-
-        #out = {name: self.out_heads[name](hiddens) for name in heads}
 
         return (hiddens, mems, attention) if return_attention else (hiddens, mems)

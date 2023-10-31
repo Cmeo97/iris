@@ -76,8 +76,8 @@ class WorldModel(nn.Module):
                 })
 
                 self.transformer = TransformerXL(
-                modality_order, num_current, self.embedder, embed_dim=config.dyn_embed_dim,
-                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                modality_order, num_current, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
                 memory_length=memory_length, max_length=max_length)
@@ -97,8 +97,8 @@ class WorldModel(nn.Module):
 
 
                 self.transformer = TransformerXL(
-                modality_order, num_current, embeds, embed_dim=config.dyn_embed_dim,
-                activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
+                modality_order, num_current, embed_dim=config.dyn_embed_dim,
+                activation=config.dyn_act, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
                 memory_length=memory_length, max_length=max_length)
@@ -183,7 +183,7 @@ class WorldModel(nn.Module):
     def __repr__(self) -> str:
         return "world_model"
 
-    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None, mems: Optional[list] = None) -> WorldModelOutput:
+    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None, mems: Optional[list] = None, stop_mask: Optional[bool] = None, tgt_length: Optional[int] = None) -> WorldModelOutput:
 
         if self.config.model == 'iris':
             if isinstance(inputs, torch.cuda.LongTensor):
@@ -215,13 +215,9 @@ class WorldModel(nn.Module):
             prev_steps = 0 if past_keys_values is None else past_keys_values.size
             if mems is not None and 'a' not in inputs.keys():
                 inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
-                prev_steps = 16 #num of obs tokens
-              
-
-            tgt_length = inputs.pop('tgt_length') if 'tgt_length' in inputs.keys() else inputs['z'].size(1)
-            stop_mask = inputs.pop('stop_mask') if 'stop_mask' in inputs.keys() else torch.zeros(inputs['z'].shape[:2], device=inputs['z'].device)
+                prev_steps = 16 # num default # of obs tokens
             
-            h, mems = self.transformer(inputs, tgt_length, stop_mask)
+            h, mems = self.transformer(inputs, tgt_length, stop_mask, mems)
 
             logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
@@ -279,11 +275,8 @@ class WorldModel(nn.Module):
                
             tokens = {'z': tokens_obs, 'a': batch['actions']}
             inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
-            
-            inputs['stop_mask'] = batch['ends']  # or , batch['mask_padding']
-            inputs['tgt_length'] = tokens_obs.shape[1]
 
-            outputs = self(inputs)
+            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=tokens_obs.shape[1])
 
             labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(tokens_obs, batch['rewards'], batch['ends'], batch['mask_padding'])
 

@@ -52,7 +52,7 @@ class WorldModelEnv:
         return outputs_wm.output_sequence  # (B, K, E)
 
     @torch.no_grad()
-    def step(self, action: Union[int, np.ndarray, torch.LongTensor], should_predict_next_obs: bool = True) -> None:
+    def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None) -> None:
         #assert self.keys_values_wm is not None and self.num_observations_tokens is not None
 
         num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
@@ -65,11 +65,10 @@ class WorldModelEnv:
         if self.model == 'iris':
             if self.keys_values_wm.size + num_passes > self.world_model.config.max_tokens:
                 _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
-            mems = None
 
             for k in range(num_passes):  # assumption that there is only one action token.
 
-                outputs_wm = self.world_model(token, past_keys_values=self.keys_values_wm, mems=mems)
+                outputs_wm = self.world_model(token, past_keys_values=self.keys_values_wm, mems=mems, stop_mask=stop_mask, tgt_length=1)
                 output_sequence.append(outputs_wm.output_sequence)
                 if mems is not None:
                     mems = outputs_wm.mems
@@ -83,12 +82,9 @@ class WorldModelEnv:
                     obs_tokens.append(token)
 
         elif self.model == 'irisXL-discrete':
-            mems = self.world_model.transformer.transformer.init_mems()
-            
-
             for k in range(num_passes):  # assumption that there is only one action token.
 
-                outputs_wm = self.world_model({'z': token.unsqueeze(1)}, mems=mems)
+                outputs_wm = self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1)
                 output_sequence.append(outputs_wm.output_sequence)
                 if mems is not None:
                     mems = outputs_wm.mems
@@ -105,7 +101,7 @@ class WorldModelEnv:
         obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
         obs = self.decode_obs_tokens() if should_predict_next_obs else None
-        return obs, reward, done, None, obs_tokens
+        return obs, reward, done, mems, obs_tokens
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:
