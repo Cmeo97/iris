@@ -1,0 +1,39 @@
+_target_: models.tokenizer.OCSAMTokenizer
+
+vocab_size: 512
+embed_dim: 64
+encoder:
+  _target_: models.tokenizer.SAEncoder
+  config:
+    _target_: models.tokenizer.OCEncoderDecoderWithViTConfig
+    # resolution: 64
+    resolution: 224
+    in_channels: 3
+    z_channels: 32
+    ch: 64
+    ch_mult: [1, 1, 1, 1, 1]
+    num_res_blocks: 2
+    attn_resolutions: [8, 16]
+    out_ch: 4
+    dropout: 0.0
+    vit_model_name: samvit_base_patch16
+    vit_use_pretrained: True
+    vit_freeze: True
+    vit_feature_level: 12
+    # vit_num_patches: 16
+    vit_num_patches: 196
+    dec_input_dim: 128 # MLPDecoder, need to match token_dim
+    dec_hidden_layers: [1024, 1024, 1024] # MLPDecoder
+    dec_output_dim: 768 # MLPDecoder
+decoder:
+  _target_: models.tokenizer.MLPDecoder
+  config: ${..encoder.config}
+slot_attn:
+  _target_: models.tokenizer.SlotAttention
+  config:
+    _target_: models.tokenizer.SAConfig
+    num_slots: 7 # num_tokens = num_slots * tokens_per_slot
+    tokens_per_slot: 1
+    iters: 3
+    channels_enc: 32
+    token_dim: 128 # need to match embed_dim if no pre_process_conv

@@ -891,3 +891,111 @@ class SlotAttentionSeparate(nn.Module):
             ##########
 
         return slots, pos
+    
+
+def resize_patches_to_image(patches: torch.Tensor, size: Optional[int] = None, 
+                            scale_factor: Optional[float] = None, resize_mode: str = "bilinear") -> torch.Tensor:
+    """Convert and resize a tensor of patches to image shape.
+
+    This method requires that the patches can be converted to a square image.
+
+    Args:
+        patches: Patches to be converted of shape (..., C, P), where C is the number of channels and
+            P the number of patches.
+        size: Image size to resize to.
+        scale_factor: Scale factor by which to resize the patches. Can be specified alternatively to
+            `size`.
+        resize_mode: Method to resize with. Valid options are "nearest", "nearest-exact", "bilinear",
+            "bicubic".
+
+    Returns:
+        Tensor of shape (..., C, S, S) where S is the image size.
+    """
+    has_size = size is None
+    has_scale = scale_factor is None
+    if has_size == has_scale:
+        raise ValueError("Exactly one of `size` or `scale_factor` must be specified.")
+
+    n_channels = patches.shape[-2]
+    n_patches = patches.shape[-1]
+    patch_size_float = sqrt(n_patches)
+    patch_size = int(sqrt(n_patches))
+    if patch_size_float != patch_size:
+        raise ValueError("The number of patches needs to be a perfect square.")
+
+    image = torch.nn.functional.interpolate(
+        patches.view(-1, n_channels, patch_size, patch_size),
+        size=size,
+        scale_factor=scale_factor,
+        mode=resize_mode,
+    )
+
+    return image.view(*patches.shape[:-1], image.shape[-2], image.shape[-1])
+
+@dataclass
+class OCEncoderDecoderWithViTConfig:
+    resolution: int
+    in_channels: int
+    z_channels: int
+    ch: int
+    ch_mult: List[int]
+    num_res_blocks: int
+    attn_resolutions: List[int]
+    out_ch: int
+    dropout: float
+    vit_model_name: str
+    vit_use_pretrained: bool
+    vit_freeze: bool
+    vit_feature_level: Union[int, str, List[Union[int, str]]]
+    vit_num_patches: int
+    dec_input_dim: int # MLPDecoder
+    dec_hidden_layers: List[int] # MLPDecoder
+    dec_output_dim: int # MLPDecoder
+    
+class MLPDecoder(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+
+        self.config = config
+        self.dec_input_dim = config.dec_input_dim
+        self.dec_hidden_layers = config.dec_hidden_layers
+        self.dec_output_dim = config.dec_output_dim
+
+        self.vit_num_patches = config.vit_num_patches
+        
+        layers = []
+        current_dim = config.dec_input_dim
+    
+        for dec_hidden_dim in config.dec_hidden_layers:
+            layers.append(nn.Linear(current_dim, dec_hidden_dim))
+            nn.init.zeros_(layers[-1].bias)
+            layers.append(nn.ReLU(inplace=True))
+            current_dim = dec_hidden_dim
+
+        layers.append(nn.Linear(current_dim, config.dec_output_dim + 1))
+        nn.init.zeros_(layers[-1].bias)
+        
+        self.layers = nn.Sequential(*layers)
+
+        self.pos_embed = nn.Parameter(torch.randn(1, config.vit_num_patches, config.dec_input_dim) * 0.02)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # z (bt, k, d)
+        init_shape = z.shape[:-1]
+        z = z.flatten(0, -2)
+        z = z.unsqueeze(1).expand(-1, self.vit_num_patches, -1)
+
+        # Simple learned additive embedding as in ViT
+        z = z + self.pos_embed
+        out = self.layers(z)
+        out = out.unflatten(0, init_shape)
+
+        # Split out alpha channel and normalize over slots.
+        decoded_patches, alpha = out.split([self.dec_output_dim, 1], dim=-1)
+        alpha = alpha.softmax(dim=-3)
+
+        reconstruction = torch.sum(decoded_patches * alpha, dim=-3)
+        masks = alpha.squeeze(-1)
+        masks_as_image = resize_patches_to_image(masks, size=self.config.resolution, resize_mode="bilinear")
+
+        return reconstruction, masks, masks_as_image

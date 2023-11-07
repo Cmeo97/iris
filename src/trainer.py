@@ -42,11 +42,19 @@ class Trainer:
         self.start_epoch = 1
         self.device = torch.device(cfg.common.device)
 
+        ### Slot-based model ###
         try:
             self.slot_based = cfg.common.slot_based
             print("The model is slot-based")
         except:
             self.slot_based = False
+
+        ### Upscaling ###
+        if cfg.tokenizer.encoder.config.resolution > 64:
+            self.upscale = True
+            print("The model is upscaling")
+        else:
+            self.upscale = False
 
         self.ckpt_dir = Path('checkpoints')
         self.media_dir = Path('media')
@@ -77,11 +85,13 @@ class Trainer:
         if self.cfg.training.should:
             train_env = create_env(cfg.env.train, cfg.collection.train.num_envs)
             self.train_dataset = instantiate(cfg.datasets.train)
+            self.train_dataset._check_upscale(self.upscale)
             self.train_collector = Collector(train_env, self.train_dataset, episode_manager_train)
 
         if self.cfg.evaluation.should:
             test_env = create_env(cfg.env.test, cfg.collection.test.num_envs)
             self.test_dataset = instantiate(cfg.datasets.test)
+            self.test_dataset._check_upscale(self.upscale)
             self.test_collector = Collector(test_env, self.test_dataset, episode_manager_test)
 
         assert self.cfg.training.should or self.cfg.evaluation.should
@@ -106,6 +116,7 @@ class Trainer:
         self.optimizer_actor_critic = torch.optim.Adam(self.agent.actor_critic.parameters(), lr=actor_critic_lr)
 
         self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(1000, 0.5, 10000))
+        # self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(10000, 0.5, 100000))
         self.scheduler_world_model = None
         self.scheduler_actor_critic = None
 
@@ -237,7 +248,7 @@ class Trainer:
             if self.slot_based:
                 batch['observations'] = torch.cat([batch['observations'], tr_batch['observations']], dim=0)
                 make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
-                self.inspect_world_model(epoch)
+                # self.inspect_world_model(epoch)
             else:
                 make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
 
