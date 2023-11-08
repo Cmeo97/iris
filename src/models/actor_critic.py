@@ -97,7 +97,10 @@ class ActorCritic(nn.Module):
             x = F.relu(self.maxp4(self.conv4(x)))
             x = torch.flatten(x, start_dim=1)
         elif collecting:
-            x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
+            if isinstance(wm.embedder, nn.ModuleDict): # irisXL
+                x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
+            else: # vanilla iris 
+                x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
         else:
             x = inputs[mask_padding] if mask_padding is not None else inputs
 

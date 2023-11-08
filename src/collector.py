@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import wandb
-
+import torch.nn as nn
 from agent import Agent
 from dataset import EpisodesDataset
 from envs import SingleProcessEnv, MultiProcessEnv
@@ -45,7 +45,10 @@ class Collector:
             burnin_obs = torch.stack([episode.observations for episode in segmented_episodes], dim=0).float().div(255).to(agent.device)
             if agent.actor_critic.latent_actor:
                 burnin_tokens = agent.tokenizer.encode(burnin_obs).tokens
-                burnin_embeddings= agent.world_model.embedder.embedding_tables[1](burnin_tokens)
+                if isinstance(agent.world_model.embedder, nn.ModuleDict): # irisXL
+                    burnin_embeddings= agent.world_model.embedder['z'](burnin_tokens)
+                else: # vanilla iris 
+                    burnin_embeddings= agent.world_model.embedder.embedding_tables[1](burnin_tokens)
             else:
                 burnin_obs_rec = torch.clamp(agent.tokenizer.encode_decode(burnin_obs, should_preprocess=True, should_postprocess=True), 0, 1)
 

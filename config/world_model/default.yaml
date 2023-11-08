@@ -32,5 +32,5 @@ dyn_discount_coef: 50
 wm_batch_size: 100
 wm_sequence_length: 340
 wm_train_steps: 1
-wm_memory_length: 256
+wm_memory_length: 17
 wm_discount_threshold: 0.1

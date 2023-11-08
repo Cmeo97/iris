@@ -13,8 +13,11 @@ conda activate irisXL
 model=$1
 task=$2
 seed=$3
-exp_name=${model}'-'${task}'-'${seed}
+memory_length=$4
+latent_Actor=$5
+
+exp_name=${model}'-'${task}'-'${seed}'-'${memory_length}
 
 
-nohup python src/main.py env.train.id=${task} world_model.model=${model} wandb.name=${exp_name} common.seed=${seed} \
+nohup python src/main.py env.train.id=${task} world_model.model=${model} world_model.wm_memory_length=${memory_length} wandb.name=${exp_name} common.seed=${seed} \
 > 'logs/'${exp_name}'.out' 2> 'logs/'${exp_name}'.err'
