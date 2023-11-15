@@ -115,8 +115,8 @@ class Trainer:
         self.optimizer_world_model = configure_optimizer(self.agent.world_model, world_model_lr, cfg.training.world_model.weight_decay)
         self.optimizer_actor_critic = torch.optim.Adam(self.agent.actor_critic.parameters(), lr=actor_critic_lr)
 
-        self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(1000, 0.5, 10000))
-        # self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(10000, 0.5, 100000))
+        # self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(1000, 0.5, 10000))
+        self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(10000, 0.5, 100000))
         self.scheduler_world_model = None
         self.scheduler_actor_critic = None
 
