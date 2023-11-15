@@ -9,14 +9,29 @@ from torchvision.utils import save_image
 def make_reconstructions_from_batch(batch, save_dir, epoch, tokenizer):
     check_batch(batch)
 
-    original_frames = tensor_to_np_frames(rearrange(batch['observations'], 'b t c h w -> b t h w c'))
-    all = [original_frames]
+    inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
+    recons = reconstruct_through_tokenizer(inputs, tokenizer)
+    b, t, _, h, w = batch['observations'].size()
+    recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
 
-    rec_frames = generate_reconstructions_with_tokenizer(batch, tokenizer)
-    all.append(rec_frames)
+    for i in range(b):
+        obs = batch['observations'][i].cpu() # (t c h w)
+        recon = recons[i].cpu() # (t c h w)
 
-    for i, image in enumerate(map(Image.fromarray, np.concatenate(list(np.concatenate((original_frames, rec_frames), axis=-2)), axis=-3))):
-        image.save(save_dir / f'epoch_{epoch:03d}_t_{i:03d}.png')
+        full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
+        full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+        full_plot = full_plot.view(-1, 3, h, w)  # (H*W, 3, D, D)
+
+        save_image(full_plot, save_dir / f'epoch_{epoch:03d}_sample_{i:03d}.png', nrow=t)
+
+    # original_frames = tensor_to_np_frames(rearrange(batch['observations'], 'b t c h w -> b t h w c'))
+    # all = [original_frames]
+
+    # rec_frames = generate_reconstructions_with_tokenizer(batch, tokenizer)
+    # all.append(rec_frames)
+
+    # for i, image in enumerate(map(Image.fromarray, np.concatenate(list(np.concatenate((original_frames, rec_frames), axis=-2)), axis=-3))):
+    #     image.save(save_dir / f'epoch_{epoch:03d}_t_{i:03d}.png')
 
     return
 
@@ -25,12 +40,13 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
     # check_batch(batch)
 
     inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
+    # inputs = batch['observations'] # video
     outputs = reconstruct_through_tokenizer_with_slots(inputs, tokenizer)
     b, t, _, _, _ = batch['observations'].size()
     recons, colors, masks = outputs
-    recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
-    colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
-    masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
+    recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t) # commentout for video
+    colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
+    masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
 
     save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch)
 

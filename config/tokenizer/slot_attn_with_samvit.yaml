@@ -6,8 +6,8 @@ encoder:
   _target_: models.tokenizer.SAEncoder
   config:
     _target_: models.tokenizer.OCEncoderDecoderWithViTConfig
-    resolution: 64
-    # resolution: 224
+    # resolution: 64
+    resolution: 224
     in_channels: 3
     z_channels: 32
     ch: 64
@@ -20,8 +20,8 @@ encoder:
     vit_use_pretrained: True
     vit_freeze: True
     vit_feature_level: 12
-    vit_num_patches: 16 # res 64
-    # vit_num_patches: 196 # res 224
+    # vit_num_patches: 16 # res 64
+    vit_num_patches: 196 # res 224
     dec_input_dim: 128 # MLPDecoder, need to match token_dim
     dec_hidden_layers: [1024, 1024, 1024] # MLPDecoder
     dec_output_dim: 768 # MLPDecoder
@@ -32,7 +32,7 @@ slot_attn:
   _target_: models.tokenizer.SlotAttention
   config:
     _target_: models.tokenizer.SAConfig
-    num_slots: 7 # num_tokens = num_slots * tokens_per_slot
+    num_slots: 11 # num_tokens = num_slots * tokens_per_slot
     tokens_per_slot: 1
     iters: 3
     channels_enc: 128

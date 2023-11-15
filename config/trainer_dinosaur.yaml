@@ -27,7 +27,7 @@ initialization:
 #   load_actor_critic: False
 
 common:
-  epochs: 600
+  epochs: 300
   device: cuda:0
   do_checkpoint: True
   seed: 0
@@ -61,10 +61,10 @@ training:
   learning_rate: 0.0001
   sampling_weights: [0.125, 0.125, 0.25, 0.5]
   tokenizer:
-    learning_rate: 0.001
-    batch_num_samples: 16
+    learning_rate: 0.0005
+    batch_num_samples: 64
     grad_acc_steps: 1
-    max_grad_norm: None
+    max_grad_norm: 1.0
     start_after_epochs: 25
     steps_per_epoch: 200
   world_model:
