@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 from omegaconf import ListConfig
 
+from .transformer_utils import *
+
 
 @dataclass
 class EncoderDecoderConfig:
@@ -671,6 +673,7 @@ class SpatialBroadcastDecoder(nn.Module):
         slot = slot.unsqueeze(-1).unsqueeze(-1)
         return slot.repeat(1, 1, self.init_resolution[0], self.init_resolution[1])
 
+
 class SlotAttention(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
         super().__init__()
@@ -701,15 +704,20 @@ class SlotAttention(nn.Module):
 
         hidden_dim = max(config.slot_dim, hidden_dim)
 
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(config.slot_dim, hidden_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(hidden_dim, config.slot_dim),
+        # )
         self.mlp = nn.Sequential(
-            nn.Linear(config.slot_dim, hidden_dim),
+            nn.Linear(config.slot_dim, config.slot_dim*4),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, config.slot_dim),
+            nn.Linear(config.slot_dim*4, config.slot_dim),
         )
 
-        self.norm_input = nn.LayerNorm(config.channels_enc, eps=0.001)
-        self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
-        self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.norm_input = nn.LayerNorm(config.channels_enc)
+        self.norm_slots = nn.LayerNorm(config.slot_dim)
+        self.norm_pre_ff = nn.LayerNorm(config.slot_dim)
         self.slot_dim = config.slot_dim
         
         self._init_params()
@@ -763,7 +771,8 @@ class SlotAttention(nn.Module):
 
         return slots
 
-class SlotAttentionSeparate(nn.Module):
+
+class SlotAttentionVideo(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
         super().__init__()
         assert config.slot_dim % config.tokens_per_slot == 0
@@ -776,39 +785,35 @@ class SlotAttentionSeparate(nn.Module):
 
         self.slots_mu = nn.Parameter(torch.rand(1, 1, config.slot_dim))
         self.slots_log_sigma = nn.Parameter(torch.randn(1, 1, config.slot_dim))
-        self.slots_pos_mu = nn.Parameter(torch.rand(1, 1, config.slot_dim))
-        self.slots_pos_log_sigma = nn.Parameter(torch.randn(1, 1, config.slot_dim))
         with torch.no_grad():
             limit = sqrt(6.0 / (1 + config.slot_dim))
             torch.nn.init.uniform_(self.slots_mu, -limit, limit)
             torch.nn.init.uniform_(self.slots_log_sigma, -limit, limit)
-            torch.nn.init.uniform_(self.slots_pos_mu, -limit, limit)
-            torch.nn.init.uniform_(self.slots_pos_log_sigma, -limit, limit)
 
         self.to_q = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
-        self.to_qpos = nn.Linear(config.slot_dim, config.slot_dim, bias=False)
-        self.to_k = nn.Linear(config.channels_enc, config.slot_dim*2, bias=False)
-        self.to_v = nn.Linear(config.channels_enc, config.slot_dim*2, bias=False)
+        self.to_k = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
+        self.to_v = nn.Linear(config.channels_enc, config.slot_dim, bias=False)
 
         self.gru = nn.GRUCell(config.slot_dim, config.slot_dim)
-        self.gru_pos = nn.GRUCell(config.slot_dim, config.slot_dim)
 
         hidden_dim = max(config.slot_dim, hidden_dim)
 
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(config.slot_dim, hidden_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(hidden_dim, config.slot_dim),
+        # )
         self.mlp = nn.Sequential(
-            nn.Linear(config.slot_dim, hidden_dim),
+            nn.Linear(config.slot_dim, config.slot_dim*4),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, config.slot_dim),
-        )
-        self.mlp_pos = nn.Sequential(
-            nn.Linear(config.slot_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, config.slot_dim),
+            nn.Linear(config.slot_dim*4, config.slot_dim),
         )
 
-        self.norm_input = nn.LayerNorm(config.channels_enc, eps=0.001)
-        self.norm_slots = nn.LayerNorm(config.slot_dim, eps=0.001)
-        self.norm_pre_ff = nn.LayerNorm(config.slot_dim, eps=0.001)
+        self.predictor = TransformerEncoder(num_blocks=1, d_model=config.slot_dim, num_heads=4, dropout=0.1)
+
+        self.norm_input = nn.LayerNorm(config.channels_enc)
+        self.norm_slots = nn.LayerNorm(config.slot_dim)
+        self.norm_pre_ff = nn.LayerNorm(config.slot_dim)
         self.slot_dim = config.slot_dim
         
         self._init_params()
@@ -824,12 +829,10 @@ class SlotAttentionSeparate(nn.Module):
         torch.nn.init.zeros_(self.gru.bias_ih)
         torch.nn.init.zeros_(self.gru.bias_hh)
         torch.nn.init.orthogonal_(self.gru.weight_hh)
-        torch.nn.init.zeros_(self.gru_pos.bias_ih)
-        torch.nn.init.zeros_(self.gru_pos.bias_hh)
-        torch.nn.init.orthogonal_(self.gru_pos.weight_hh)
 
     def forward(self, inputs: torch.Tensor, num_slots: Optional[int] = None) -> torch.Tensor:
-        b, n, d = inputs.shape
+        assert len(inputs.shape) == 4
+        b, T, n, d = inputs.shape
         if num_slots is None:
             num_slots = self.num_slots
 
@@ -837,60 +840,40 @@ class SlotAttentionSeparate(nn.Module):
         sigma = self.slots_log_sigma.expand(b, num_slots, -1).exp()
         slots = torch.normal(mu, sigma)
 
-        mu_pos = self.slots_pos_mu.expand(b, num_slots, -1)
-        sigma_pos = self.slots_pos_log_sigma.expand(b, num_slots, -1).exp()
-        pos = torch.normal(mu_pos, sigma_pos)
-
         inputs = self.norm_input(inputs)
-        k, k_pos = self.to_k(inputs).chunk(2, dim=-1) 
-        v, v_pos = self.to_v(inputs).chunk(2, dim=-1)
+        k, v = self.to_k(inputs), self.to_v(inputs)
+        k *= self.scale
 
-        for _ in range(self.iters):
-            slots_prev = slots
-            pos_prev = pos
+        slots_list = []
+        for t in range(T):
+            for i in range(self.iters):
+                slots_prev = slots
 
-            # slots
-            slots = self.norm_slots(slots)
-            q = self.to_q(slots)
+                slots = self.norm_slots(slots)
+                q = self.to_q(slots)
 
-            dots = torch.einsum("bid,bjd->bij", q, k) * self.scale
-            attn = dots.softmax(dim=1) + self.eps
-            attn = attn / attn.sum(dim=-1, keepdim=True)
+                dots = torch.bmm(k[:, t], q.transpose(-1, -2))
+                attn = dots.softmax(dim=-1) + self.eps
+                attn = attn / torch.sum(attn, dim=-2, keepdim=True)
+                updates = torch.bmm(attn.transpose(-1, -2), v[:, t])
 
-            updates = torch.einsum("bjd,bij->bid", v, attn)
+                slots = self.gru(updates.view(-1, self.slot_dim),
+                                 slots_prev.view(-1, self.slot_dim))
+                slots = slots.view(-1, self.num_slots, self.slot_dim)
 
-            ##########
-            # pos
-            pos = self.norm_slots(pos)
-            qpos = self.to_qpos(pos)
+                # use MLP only when more than one iterations
+                if i < self.iters - 1:
+                    slots = slots + self.mlp(self.norm_pre_ff(slots))
+                
+            slots_list += [slots]
 
-            dots_pos = torch.einsum("bid,bjd->bij", qpos, k_pos) * self.scale
-            attn_pos = dots_pos.softmax(dim=1) + self.eps
-            attn_pos = attn_pos / attn_pos.sum(dim=-1, keepdim=True)
+            # predictor
+            slots = self.predictor(slots)
 
-            updates_pos = torch.einsum("bjd,bij->bid", v_pos, attn_pos)
+        slots_list = torch.stack(slots_list, dim=1)   # B, T, num_slots, slot_size
 
-            updates = updates + updates_pos # "positional embedding" to slots
-            ##########
+        return slots_list
 
-            slots = self.gru(
-                updates.reshape(-1, self.slot_dim), slots_prev.reshape(-1, self.slot_dim)
-            )
-
-            slots = slots.reshape(b, -1, self.slot_dim)
-            slots = (slots + self.mlp(self.norm_pre_ff(slots)))
-
-            ##########
-            # pos
-            pos = self.gru_pos(
-                updates_pos.reshape(-1, self.slot_dim), pos_prev.reshape(-1, self.slot_dim)
-            )
-
-            pos = pos.reshape(b, -1, self.slot_dim)
-            pos = (pos + self.mlp_pos(self.norm_pre_ff(pos)))
-            ##########
-
-        return slots, pos
     
 
 def resize_patches_to_image(patches: torch.Tensor, size: Optional[int] = None, 

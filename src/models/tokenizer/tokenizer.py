@@ -14,7 +14,7 @@ import timm
 
 from dataset import Batch
 from .lpips import LPIPS
-from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder, SlotAttentionSeparate, MLPDecoder
+from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder, SlotAttentionVideo, MLPDecoder
 from .quantizer import *
 from utils import LossWithIntermediateLosses
 
@@ -508,7 +508,7 @@ class TokenizerWithPosEncoderOutput:
     tokens: torch.LongTensor
 
 class OCTokenizerWithSeparatePos(OCTokenizer):
-    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: SpatialBroadcastDecoder, slot_attn: SlotAttentionSeparate, with_lpips: bool = True) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: SpatialBroadcastDecoder, slot_attn: SlotAttention, with_lpips: bool = True) -> None:
         super().__init__(vocab_size, embed_dim, encoder, decoder, slot_attn, with_lpips)
 
     def forward(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> Tuple[torch.Tensor]:
@@ -737,7 +737,7 @@ class TokenizerWithSAMEncoderOutput:
     z_vit: torch.FloatTensor
 
 class OCSAMTokenizer(OCTokenizer):
-    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: MLPDecoder, slot_attn: SlotAttention, with_lpips: bool = True) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: MLPDecoder, slot_attn: Union[SlotAttention, SlotAttentionVideo], with_lpips: bool = True) -> None:
         super().__init__(vocab_size, embed_dim, encoder, decoder, slot_attn, with_lpips)
         self.vocab_size = vocab_size
         self.encoder = encoder
@@ -828,6 +828,7 @@ class OCSAMTokenizer(OCTokenizer):
     def compute_loss(self, batch: Batch, **kwargs: Any) -> LossWithIntermediateLosses:
         assert self.lpips is not None
         observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
+        # observations = rearrange(observations, '(b t) c h w -> b t c h w', b=batch['observations'].shape[0]) # video
         z, z_vit, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
 
         reconstruction_loss = torch.pow(z_vit - reconstructions, 2).mean()
@@ -883,7 +884,10 @@ class OCSAMTokenizer(OCTokenizer):
         # z = rearrange(z, 'b e c -> b c e')
         z, _ = self.vit_encode(x)
         z = self.pos_embed(z)
+
+        # z = z.reshape(*shape[:-3], *z.shape[1:]) # video
         z = self.slot_attn(z)
+        # z = z.view(-1, *z.shape[-2:]) # video
 
         z_vit, _ = self.vit_encode(x)
         
@@ -911,7 +915,11 @@ class OCSAMTokenizer(OCTokenizer):
         masks_as_image = masks_as_image.reshape(*shape[:-2], *masks_as_image.shape[1:])
         if should_postprocess:
             rec = self.postprocess_output(rec)
-        return x, x.unsqueeze(1).expand(-1, self.num_slots, -1, -1, -1), masks_as_image.unsqueeze(2)
+        if len(x.shape) == 4:
+            colors = x.unsqueeze(-4).expand(-1, self.num_slots, -1, -1, -1)
+        else:
+            colors = x.unsqueeze(-4).expand(-1, -1, self.num_slots, -1, -1, -1)
+        return x, colors, masks_as_image.unsqueeze(-3)
     
     @torch.no_grad()
     def encode_decode(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
