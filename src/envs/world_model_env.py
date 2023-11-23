@@ -98,10 +98,10 @@ class WorldModelEnv:
                     obs_tokens.append(token)
 
         output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-        obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
+        self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
         obs = self.decode_obs_tokens() if should_predict_next_obs else None
-        return obs, reward, done, mems, obs_tokens
+        return obs, reward, done, mems, self.obs_tokens
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:
