@@ -41,7 +41,7 @@ class WorldModelEnv:
         if self.model == 'iris':
             _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
         return self.decode_obs_tokens(), self.obs_tokens
-
+    
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
@@ -82,10 +82,14 @@ class WorldModelEnv:
                     obs_tokens.append(token)
 
         elif self.model == 'irisXL-discrete':
+            
+            if self.keys_values_wm.size + num_passes > self.world_model.config.max_tokens or output_sequence==[]:
+                h = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens, return_embedding=True)
+            
             for k in range(num_passes):  # assumption that there is only one action token.
 
-                outputs_wm = self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1)
-                output_sequence.append(outputs_wm.output_sequence)
+                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1)
+                #output_sequence.append(outputs_wm.output_sequence)
                 if mems is not None:
                     mems = outputs_wm.mems
 
@@ -95,9 +99,10 @@ class WorldModelEnv:
 
                 if k < self.num_observations_tokens:
                     token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    h = outputs_wm.output_sequence
                     obs_tokens.append(token)
 
-        output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
+        #output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
         self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
         obs = self.decode_obs_tokens() if should_predict_next_obs else None

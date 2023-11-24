@@ -22,6 +22,7 @@ from make_reconstructions import make_reconstructions_from_batch
 from models.actor_critic import ActorCritic
 from models.world_model import WorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed
+from torchvision.utils import save_image
 
 
 class Trainer:
@@ -191,7 +192,7 @@ class Trainer:
 
         if epoch > cfg_world_model.start_after_epochs:
             metrics_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer)
-
+            self.inspect_world_model(epoch)
         if epoch > cfg_actor_critic.start_after_epochs:
             self.inspect_imagination(epoch)
 
@@ -242,6 +243,34 @@ class Trainer:
             to_log.append({f'{mode_str}/{k}': v for k, v in metrics_episode.items()})
 
         return to_log
+    
+    
+    @torch.no_grad()
+    def inspect_world_model(self, epoch: int) -> None:
+        batch = self.train_dataset.sample_batch(batch_num_samples=1, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
+        recons, colors, masks = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, burn_in=5, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
+
+        save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, colors, masks, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
+
+    
+        def save_image_with_slots(observations, recons, colors, masks, save_dir, epoch, suffix='sample'):
+            b, t, _, _, _ = observations.size()
+
+            for i in range(b):
+                obs = observations[i].cpu() # (t c h w)
+                recon = recons[i].cpu() # (t c h w)
+
+                full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
+                color = colors[i].cpu()
+                mask = masks[i].cpu()
+                subimage = color * mask
+                mask = mask.repeat(1,1,3,1,1)
+                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+                full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+                full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+                save_image(full_plot, save_dir / f'epoch_{epoch:03d}_{suffix}_{i:03d}.png', nrow=t)
+
 
     def _save_checkpoint(self, epoch: int, save_agent_only: bool) -> None:
         torch.save(self.agent.state_dict(), self.ckpt_dir / 'last.pt')

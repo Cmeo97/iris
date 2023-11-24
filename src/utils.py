@@ -102,6 +102,8 @@ class LossWithIntermediateLosses:
             self.intermediate_losses[k] = v / value
         self.loss_total = self.loss_total / value
         return self
+    
+
 
 
 class EpisodeDirManager:

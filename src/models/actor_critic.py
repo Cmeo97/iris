@@ -17,6 +17,7 @@ from models.tokenizer import Tokenizer
 from models.world_model import WorldModel
 from utils import compute_lambda_returns, LossWithIntermediateLosses
 from einops import rearrange
+from .nets import MLP
 
 
 @dataclass
@@ -37,10 +38,11 @@ class ImagineOutput:
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, act_vocab_size, use_original_obs: bool = False, model: str = 'iris', latent_actor: bool = False) -> None:
+    def __init__(self, act_vocab_size, use_original_obs: bool = False, model: str = 'iris', latent_actor: bool = False, linear_actor: bool = True) -> None:
         super().__init__()
         self.use_original_obs = use_original_obs
         self.latent_actor = latent_actor
+        self.linear_actor = linear_actor
         self.model = model
         self.lstm_dim = 512
 
@@ -55,11 +57,17 @@ class ActorCritic(nn.Module):
             self.maxp4 = nn.MaxPool2d(2, 2)
             self.lstm = nn.LSTMCell(1024, self.lstm_dim)
         else:
-            self.lstm = nn.LSTMCell(256, self.lstm_dim)
+            self.lstm = nn.LSTMCell(1024, self.lstm_dim) 
+            self.tanh = nn.Tanh()
+            self.linear = nn.Linear(256, 1024)
 
         self.hx, self.cx = None, None
-        self.critic_linear = nn.Linear(512, 1)
-        self.actor_linear = nn.Linear(512, act_vocab_size)
+        if self.linear_actor:
+            self.critic_linear = nn.Linear(512, 1)
+            self.actor_linear = nn.Linear(512, act_vocab_size)
+        else:
+            self.critic_linear = MLP(512, [128, 128], 1, 'tanh', pre_activation=True)
+            self.actor_linear = MLP(512, [128, 128], act_vocab_size, 'tanh', pre_activation=True)
 
     def __repr__(self) -> str:
         return "actor_critic"
@@ -99,10 +107,14 @@ class ActorCritic(nn.Module):
         elif collecting:
             if isinstance(wm.embedder, nn.ModuleDict): # irisXL
                 x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
+                x = self.tanh(x)
+                x = self.linear(x)
             else: # vanilla iris 
                 x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
+                x = self.tanh(x)
+                x = self.linear(x)
         else:
-            x = inputs[mask_padding] if mask_padding is not None else inputs
+            x = inputs[mask_padding] if mask_padding is not None else inputs # check mask padding
 
 
         if x.ndim > 2: # when using latent rapresentations for actor
@@ -117,7 +129,7 @@ class ActorCritic(nn.Module):
             else:
                 self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x, (self.hx[mask_padding], self.cx[mask_padding]))
 
-
+      
         logits_actions = rearrange(self.actor_linear(self.hx), 'b a -> b 1 a')
         means_values = rearrange(self.critic_linear(self.hx), 'b 1 -> b 1 1')
 
@@ -170,6 +182,7 @@ class ActorCritic(nn.Module):
         else:
             with torch.no_grad():
                 burnin_tokens_obs = tokenizer.encode(initial_observations[:, :-1], should_preprocess=True).tokens if initial_observations.size(1) > 1 else None
+                
                 if isinstance(wm_env.world_model.embedder, Embedder): # vanilla iris is used 
                     b, l, t = burnin_tokens_obs.shape
                     burnin_tokens_obs = rearrange(burnin_tokens_obs, 'b l t -> b (l t)') 
@@ -178,7 +191,8 @@ class ActorCritic(nn.Module):
                     b, l, t = burnin_tokens_obs.shape
                     burnin_encodings = wm_env.world_model.embedder['z'](burnin_tokens_obs)
                 self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1])
-
+                _ = wm_env.reset_from_embeddings(burnin_observations=burnin_encodings)
+            
             self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1])
         if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
             embedder = wm_env.world_model.embedder['z'].eval()
@@ -218,5 +232,3 @@ class ActorCritic(nn.Module):
 
         
         
-    
-  

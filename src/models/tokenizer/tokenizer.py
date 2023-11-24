@@ -90,6 +90,14 @@ class Tokenizer(nn.Module):
             rec = self.postprocess_output(rec)
         return rec
 
+
+    @torch.no_grad()
+    def get_post_zq(self, z_q: torch.Tensor) -> torch.Tensor:
+        shape = z_q.shape
+        z_q = z_q.view(-1, *shape[-3:])
+        h = self.post_quant_conv(z_q)
+        return h
+
     @torch.no_grad()
     def encode_decode(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:
         z_q = self.encode(x, should_preprocess).z_quantized
