@@ -1,3 +1,4 @@
+config/trainer_mila.yaml
 .nfs*
 # Custom
 *.err
