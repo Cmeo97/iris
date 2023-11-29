@@ -305,3 +305,20 @@ class TransformerXL(nn.Module):
         hiddens, mems, attention = outputs if return_attention else (outputs + (None,))
 
         return (hiddens, mems, attention) if return_attention else (hiddens, mems)
+
+
+
+    def initialize_embeddings(self, embeds, tgt_length, stop_mask, mems=None, return_attention=False):
+        num_current_tokens = embeds['z'].shape[2]   
+        history_length = embeds[self.modality_order[0]].shape[1] - 1  # assuming dim is (B, L, T, embed_dim (or encodings_dim if continuos Tf_XL))
+        inputs = rearrange(embeds['z'], 'b l t e -> b (l t) e')
+        tgt_length = (tgt_length - 1) * num_current_tokens + num_current_tokens
+        src_length = history_length * num_current_tokens + num_current_tokens
+        assert inputs.shape[1] == src_length 
+        src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask, num_current_tokens)
+ 
+        positions = torch.arange(src_length - 1, -1, -1, device=inputs.device) 
+        hiddens, _ = self.transformer(
+            inputs, positions, attn_mask=src_mask, mems=mems, tgt_length=tgt_length, return_attention=return_attention)
+        
+        return hiddens

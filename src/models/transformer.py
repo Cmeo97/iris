@@ -54,7 +54,8 @@ class TransformerConfig:
     wm_train_steps: int
     wm_memory_length: int
     wm_discount_threshold: float
-
+    regularization: bool
+    embedding_input: bool
 
     @property
     def max_tokens(self):

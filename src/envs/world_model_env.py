@@ -50,6 +50,11 @@ class WorldModelEnv:
         self.keys_values_wm = self.world_model.transformer.generate_empty_keys_values(n=n, max_tokens=self.world_model.config.max_tokens)
         outputs_wm = self.world_model(obs_tokens, past_keys_values=self.keys_values_wm)
         return outputs_wm.output_sequence  # (B, K, E)
+    
+    #@torch.no_grad()
+    #def refresh_embeddings_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor, stop_mask: Optional[bool] = None) -> torch.FloatTensor:
+    #    embeddings = self.world_model.transformer.initialize_embeddings({'z': self.world_model.embedder['z'](obs_tokens.unsqueeze(1))}, tgt_length=16, stop_mask=stop_mask)
+    #    return embeddings   # (B, K, E)
 
     @torch.no_grad()
     def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None) -> None:
@@ -83,12 +88,13 @@ class WorldModelEnv:
 
         elif self.model == 'irisXL-discrete':
             
-            if self.keys_values_wm.size + num_passes > self.world_model.config.max_tokens or output_sequence==[]:
-                h = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens, return_embedding=True)
+            
+            #h = self.refresh_embeddings_with_initial_obs_tokens(obs_tokens=self.obs_tokens, stop_mask=stop_mask)
+            h = self.world_model.embedder['a'](token)
             
             for k in range(num_passes):  # assumption that there is only one action token.
 
-                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1)
+                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
                 #output_sequence.append(outputs_wm.output_sequence)
                 if mems is not None:
                     mems = outputs_wm.mems

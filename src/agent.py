@@ -19,7 +19,7 @@ class Agent(nn.Module):
 
     @property
     def device(self):
-        return self.actor_critic.critic_linear.weight.device
+        return self.actor_critic.lstm.bias_hh.device
 
     def load(self, path_to_checkpoint: Path, device: torch.device, load_tokenizer: bool = True, load_world_model: bool = True, load_actor_critic: bool = True) -> None:
         agent_state_dict = torch.load(path_to_checkpoint, map_location=device)

@@ -21,7 +21,7 @@ wandb:
   notes: null
 
 initialization:
-  path_to_checkpoint: /space/cristianmeo/iris/outputs/2023-10-31/20-39-11/checkpoints/last.pt
+  path_to_checkpoint: /space/cristianmeo/iris/outputs/2023-11-10/17-36-33/checkpoints/last.pt
   load_tokenizer: True
   load_world_model: False
   load_actor_critic: False
@@ -72,6 +72,8 @@ training:
     weight_decay: 0.000001
     start_after_epochs: 5
     steps_per_epoch: 200
+    regularization: ${world_model.regularization}
+    embedding_input: ${world_model.embedding_input}
   actor_critic:
     batch_num_samples: 64
     grad_acc_steps: 1
@@ -94,6 +96,8 @@ evaluation:
   world_model:
     batch_num_samples: ${training.world_model.batch_num_samples}
     start_after_epochs: ${training.world_model.start_after_epochs}
+    regularization: ${world_model.regularization}
+    embedding_input: ${world_model.embedding_input}
   actor_critic:
     num_episodes_to_save: ${training.actor_critic.batch_num_samples}
     horizon: ${training.actor_critic.imagine_horizon}

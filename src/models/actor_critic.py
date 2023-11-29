@@ -76,7 +76,7 @@ class ActorCritic(nn.Module):
         self.hx, self.cx = None, None
 
     def reset(self, n: int, burnin_observations: Optional[torch.Tensor] = None, mask_padding: Optional[torch.Tensor] = None) -> None:
-        device = self.critic_linear.weight.device
+        device = self.lstm.bias_hh.device
         self.hx = torch.zeros(n, self.lstm_dim, device=device)
         self.cx = torch.zeros(n, self.lstm_dim, device=device)
         if burnin_observations is not None:
@@ -104,20 +104,18 @@ class ActorCritic(nn.Module):
             x = F.relu(self.maxp3(self.conv3(x)))
             x = F.relu(self.maxp4(self.conv4(x)))
             x = torch.flatten(x, start_dim=1)
-        elif collecting:
+        #elif collecting:
+        else:
             if isinstance(wm.embedder, nn.ModuleDict): # irisXL
                 x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
-                x = self.tanh(x)
-                x = self.linear(x)
             else: # vanilla iris 
                 x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
-                x = self.tanh(x)
-                x = self.linear(x)
-        else:
-            x = inputs[mask_padding] if mask_padding is not None else inputs # check mask padding
+      
 
 
-        if x.ndim > 2: # when using latent rapresentations for actor
+        if self.latent_actor: 
+            x = self.tanh(x)
+            x = self.linear(x)
             for i in range(x.shape[1]):
                 if mask_padding is None:
                     self.hx, self.cx = self.lstm(x[:, i], (self.hx, self.cx))
@@ -128,6 +126,8 @@ class ActorCritic(nn.Module):
                 self.hx, self.cx = self.lstm(x, (self.hx, self.cx))
             else:
                 self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x, (self.hx[mask_padding], self.cx[mask_padding]))
+                if mask_padding.any() == False:
+                    print('mask_padding_false')
 
       
         logits_actions = rearrange(self.actor_linear(self.hx), 'b a -> b 1 a')
@@ -229,6 +229,42 @@ class ActorCritic(nn.Module):
         rewards=torch.cat(all_rewards, dim=1).to(device),                       # (B, T)
         ends=torch.cat(all_ends, dim=1).to(device),                             # (B, T)
         )
+        
+        
+    @torch.no_grad()
+    def rollout(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel, horizon: int, show_pbar: bool = False) -> ImagineOutput:
+        assert not self.use_original_obs
+        observations = batch['observations']
+        mask_padding = batch['mask_padding']
+        assert observations.ndim == 5 and observations.shape[2:] == (3, 64, 64)
+        assert mask_padding[:, -1].all()
+        device = observations.device
+        wm_env = WorldModelEnv(tokenizer, world_model, device, model=self.model)
 
+        all_actions = []
+        all_rewards = []
+        all_ends = []
+        all_observations = []
+        if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
+            mems = wm_env.world_model.transformer.transformer.init_mems()  # Memory Initialization 
+        else:
+            mems = None
         
-        
+        obs, _ = wm_env.reset_from_initial_observations(observations[:, 0])
+        stop_mask = torch.zeros((obs.shape[0], 1), device=obs.device) # Stop Mask initialization
+        for k in tqdm(range(horizon), disable=not show_pbar, desc='Rollout', file=sys.stdout):
+
+            action_token = rearrange(batch['actions'][:, k], 'b -> b 1 1')
+            obs, reward, done, mems, _ = wm_env.step(action_token, mems, should_predict_next_obs=True, stop_mask=stop_mask)
+
+
+            all_actions.append(action_token)
+            all_rewards.append(torch.tensor(reward).reshape(-1, 1))
+            all_ends.append(torch.tensor(done).reshape(-1, 1))
+            stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
+            all_observations.append(obs)
+            
+        all_observations = torch.stack(all_observations, dim=1) # (B, T, C, H, W)
+
+        return all_observations
+

@@ -229,6 +229,8 @@ class WorldModel(nn.Module):
                 else:
                     inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
                 prev_steps = 16 + mems[0].shape[0] # num default # of obs tokens
+            elif embedding_input and mems is not None:
+                    inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
             
             h, mems = self.transformer(inputs, tgt_length, stop_mask, mems)
 
@@ -236,9 +238,13 @@ class WorldModel(nn.Module):
             logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
             if self.config.model == 'irisXL-discrete':
                 logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
-                return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends, mems)
+                if embedding_input:
+                    embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
+                else: 
+                    embeddings = h
+                return WorldModelOutput(embeddings, logits_observations, logits_rewards, logits_ends, mems)
             else:
-                encodings = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
+                encodings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
                 return ContinuosWorldModelOutput(h, encodings, logits_rewards, logits_ends)
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
@@ -286,7 +292,7 @@ class WorldModel(nn.Module):
             tokens = {'z': obs_tokens, 'a': batch['actions']}
             inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
 
-            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1])
+            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=self.embedding_input)
 
             labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
@@ -295,8 +301,8 @@ class WorldModel(nn.Module):
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
             if self.embedding_input:
-                embeddings = rearrange(outputs.embeddings[:, :-1], 'b t o e -> (b t) o e')
-                loss_embedding = F.mse_loss(embeddings, inputs['z'])
+                embeddings = outputs.output_sequence[:, :-1]
+                loss_embedding = F.mse_loss(embeddings, rearrange(inputs['z'], 'b s t o -> b (s t) o')[:, 1:])
                 
                 return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embedding)
             
@@ -312,13 +318,13 @@ class WorldModel(nn.Module):
             inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
 
             for i in range(obs_tokens.shape[2]+1):  # extra iteration to account for action token 
-                outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1])
-                
+                outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=self.embedding_input)
+                tokens = {'z': Categorical(logits=outputs.logits_observations).sample(), 'a': batch['actions']}
+                inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
                 if self.embedding_input:
-                    inputs = {'h': outputs.output_sequence, 'a':self.embedder['a'](batch['actions'])}
-                else:
-                    tokens = {'z': Categorical(logits=outputs.logits_observations).sample(), 'a': batch['actions']}
-                    inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
+                    inputs['h'] = outputs.output_sequence
+                
+                    
 
             i = i - 1 # one extra iteration is done to account for action token, but to remove tokens of the last observation I need only i - 1 then 
             labels_observations, _, _ = self.compute_labels_world_model(obs_tokens[:, i:], batch['rewards'], batch['ends'], batch['mask_padding'][:, i:])
