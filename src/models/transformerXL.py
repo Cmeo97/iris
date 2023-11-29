@@ -269,10 +269,7 @@ class TransformerXL(nn.Module):
             m_xs = torch.cat(xs, dim=2)
             return m_xs.reshape(batch_size, seq_len * (num_tokens+1), dim)
 
-        if 'a' not in embeds.keys():
-            num_current_tokens = embeds['z'].shape[1]   # z tokens + mems tokens
-        else:
-            num_current_tokens = embeds['z'].shape[2] + embeds['a'].unsqueeze(2).shape[2]
+        num_current_tokens = embeds['z'].shape[1] if 'a' not in embeds.keys() else embeds['z'].shape[2] + embeds['a'].unsqueeze(2).shape[2]
         
         if mems is None:
             history_length = embeds[self.modality_order[0]].shape[1] - 1  # assuming dim is (B, L, T, embed_dim (or encodings_dim if continuos Tf_XL))
@@ -289,10 +286,7 @@ class TransformerXL(nn.Module):
             assert inputs.shape[1] == src_length 
             src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask, num_current_tokens)
         else:
-            sequence_length = embeds['z'].shape[1] # assuming dim is (B, L, embed_dim (or encodings_dim if continuos Tf_XL))
-            # switch order so that 'currents' are last
-            #inputs = cat_modalities(
-            #    [embeds[name] for name in (self.modality_order[num_current_tokens:] + self.modality_order[:num_current_tokens])])
+            sequence_length = 1 if embeds['z'].dim() == 3 else embeds['z'].shape[1] # assuming dim is (B, L, embed_dim (or encodings_dim if continuos Tf_XL))
             inputs = embeds['z']
             tgt_length = tgt_length * num_current_tokens
             mem_num_tokens = mems[0].shape[0]

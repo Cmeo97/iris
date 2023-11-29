@@ -216,21 +216,18 @@ class WorldModel(nn.Module):
 
         elif self.config.model == 'irisXL-discrete' or self.config.model == 'irisXL-continuos':
 
-            if inputs['z'].size(1) == 1:
-                num_steps = 1
-            else:
-                num_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1)  # (B, L, T) -> L*(T+1), 1 for action token
-      
-            assert num_steps <= self.config.max_tokens
-            prev_steps = 0 if past_keys_values is None else past_keys_values.size
             if mems is not None and 'a' not in inputs.keys():
                 if embedding_input:
                     inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
                 else:
                     inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
+                num_steps = inputs['z'].size(1) if inputs['z'].dim() == 3 else inputs['z'].size(1)*inputs['z'].size(2)
                 prev_steps = 16 + mems[0].shape[0] # num default # of obs tokens
             elif embedding_input and mems is not None:
                     inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
+            else: 
+                num_steps, prev_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1), 0  # (B, L, T) -> L*(T+1), 1 for action token
+                
             
             h, mems = self.transformer(inputs, tgt_length, stop_mask, mems)
 

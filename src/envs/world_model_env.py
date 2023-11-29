@@ -19,7 +19,7 @@ class WorldModelEnv:
         self.tokenizer = tokenizer.to(self.device).eval()
         self.model = model
         self.keys_values_wm, self.obs_tokens, self._num_observations_tokens = None, None, None
-
+        self.parallel_imagination = True
         self.env = env
 
     @property
@@ -91,28 +91,56 @@ class WorldModelEnv:
             
             #h = self.refresh_embeddings_with_initial_obs_tokens(obs_tokens=self.obs_tokens, stop_mask=stop_mask)
             h = self.world_model.embedder['a'](token)
-            
-            for k in range(num_passes):  # assumption that there is only one action token.
-
+            if self.parallel_imagination:
+                
                 outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
-                #output_sequence.append(outputs_wm.output_sequence)
-                if mems is not None:
-                    mems = outputs_wm.mems
+                reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                token = Categorical(logits=outputs_wm.logits_observations).sample()
+                output_sequence.append(outputs_wm.output_sequence)
+                obs_tokens.append(token)
+                obs_tokens_cat = torch.cat(obs_tokens, dim=1)        # (B, K)
+                output_sequence_cat = torch.cat(output_sequence, dim=1) 
+                
+                for k in range(num_passes):  # assumption that there is only one action token.
 
-                if k == 0:
-                    reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
-                    done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                    outputs_wm = self.world_model({'z': obs_tokens_cat, 'h': output_sequence_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': obs_tokens_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
+                    #output_sequence.append(outputs_wm.output_sequence)
+                    if mems is not None:
+                        mems = outputs_wm.mems
 
-                if k < self.num_observations_tokens:
-                    token = Categorical(logits=outputs_wm.logits_observations).sample()
-                    h = outputs_wm.output_sequence
-                    obs_tokens.append(token)
+                    if k < self.num_observations_tokens:
+                        token = Categorical(logits=outputs_wm.logits_observations).sample()
+                        output_sequence.append(outputs_wm.output_sequence)
+                        obs_tokens.append(token)
+                        output_sequence_cat = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
+                        obs_tokens_cat = torch.cat(obs_tokens, dim=1)        # (B, K)
+                        
+            else: 
+                for k in range(num_passes):  # assumption that there is only one action token.
 
-        #output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-        self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
+                    outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
+                    #output_sequence.append(outputs_wm.output_sequence)
+                    if mems is not None:
+                        mems = outputs_wm.mems
 
-        obs = self.decode_obs_tokens() if should_predict_next_obs else None
-        return obs, reward, done, mems, self.obs_tokens
+                    if k == 0:
+                        reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                        done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+
+                    if k < self.num_observations_tokens:
+                        token = Categorical(logits=outputs_wm.logits_observations).sample()
+                        h = outputs_wm.output_sequence
+                        obs_tokens.append(token)
+
+            output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
+            self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
+
+            obs = self.decode_obs_tokens() if should_predict_next_obs else None
+            return obs, reward, done, mems, self.obs_tokens
+
+                
+                
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:
