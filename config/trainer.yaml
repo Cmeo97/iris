@@ -68,12 +68,11 @@ training:
   world_model:
     batch_num_samples: 64
     grad_acc_steps: 1
-    max_grad_norm: 100
-    weight_decay: 0.000001
+    max_grad_norm: 10
+    weight_decay: 0.01
     start_after_epochs: 5
     steps_per_epoch: 200
-    regularization: ${world_model.regularization}
-    embedding_input: ${world_model.embedding_input}
+
   actor_critic:
     batch_num_samples: 64
     grad_acc_steps: 1
@@ -96,8 +95,7 @@ evaluation:
   world_model:
     batch_num_samples: ${training.world_model.batch_num_samples}
     start_after_epochs: ${training.world_model.start_after_epochs}
-    regularization: ${world_model.regularization}
-    embedding_input: ${world_model.embedding_input}
+
   actor_critic:
     num_episodes_to_save: ${training.actor_critic.batch_num_samples}
     horizon: ${training.actor_critic.imagine_horizon}

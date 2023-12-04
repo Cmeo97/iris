@@ -39,7 +39,7 @@ class TransformerXLDecoder(nn.Module):
         else:
             return None
 
-    def forward(self, x, positions, attn_mask, mems=None, tgt_length=None, return_attention=False):
+    def forward(self, x, positions, attn_mask, mems=None, tgt_length=None, return_attention=False, generation=False):
         if self.batch_first:
             x = x.transpose(0, 1)
 
@@ -52,26 +52,32 @@ class TransformerXLDecoder(nn.Module):
       
         pos_enc = self.pos_enc(positions)
         hiddens = [x]
-        attentions = []
+        #attentions = []
         out = x
         for i, layer in enumerate(self.layers):
-            out, attention = layer(out, pos_enc, self.u_bias, self.v_bias, attn_mask=attn_mask, mems=mems[i])
+            out, _ = layer(out, pos_enc, self.u_bias, self.v_bias, attn_mask=attn_mask, mems=mems[i])
             hiddens.append(out)
-            attentions.append(attention)
+            #attentions.append(attention)
 
-        out = out[-tgt_length:]
+        out = out[-tgt_length:]   #check in the tmw repository dimensionality of out!!
 
         if self.batch_first:
             out = out.transpose(0, 1)
 
         assert len(hiddens) == len(mems)
-        with torch.no_grad():
-            for i in range(len(hiddens)):
-                mems[i] = torch.cat([mems[i], hiddens[i]], dim=0)[-self.mem_length:]
-             
-        if return_attention:
-            attention = torch.stack(attentions, dim=-2)
-            return out, mems, attention
+        if generation:
+            with torch.no_grad():
+                for i in range(len(hiddens)):
+                    mems[i] = torch.cat([mems[i], hiddens[i]], dim=0)[-self.mem_length:]
+        else:
+            with torch.no_grad():
+                for i in range(len(hiddens)):
+                    mems[i] = torch.cat([mems[i], hiddens[i][0].unsqueeze(0)], dim=0)[-self.mem_length:]
+
+        del hiddens    
+        #if return_attention:
+            #attention = torch.stack(attentions, dim=-2)
+            #return out, mems, attention
         return out, mems
 
 
@@ -216,24 +222,24 @@ class TransformerXL(nn.Module):
 
 
     @lru_cache(maxsize=20)
-    def _get_base_mask(self, src_length, tgt_length, device,  num_current_tokens):
+    def _get_base_mask(self, src_length, tgt_length, device,  num_current_tokens, memory_length):
         src_mask = torch.ones(tgt_length, src_length, dtype=torch.bool, device=device)
         num_modalities = len(self.modality_order)
         for tgt_index in range(tgt_length):
             # the last indices are always 'current'
             start_index = src_length - num_current_tokens
-            src_index = src_length - tgt_length + tgt_index
+            src_index = src_length - tgt_length + tgt_index 
             modality_index = (src_index - start_index) % num_modalities
             if modality_index <  num_current_tokens:
-                start = max(src_index - (self.memory_length + 1) * num_modalities, 0)
+                start = max(src_index - (memory_length + 1) * num_modalities, 0)
             else:
                 start = max(src_index - modality_index - self.memory_length * num_modalities, 0)
             src_mask[tgt_index, start:src_index + 1] = False
         return src_mask
 
-    def _get_mask(self, src_length, tgt_length, device, stop_mask, num_current_tokens, mem_num_tokens=0):
+    def _get_mask(self, src_length, tgt_length, device, stop_mask, num_current_tokens, mem_num_tokens=0, generation=False):
 
-        src_mask = self._get_base_mask(src_length, tgt_length, device, num_current_tokens)
+        src_mask = self._get_base_mask(src_length, tgt_length, device, num_current_tokens, mem_num_tokens)
 
         batch_size, seq_length = stop_mask.shape
         stop_mask = stop_mask.t()
@@ -251,17 +257,23 @@ class TransformerXL(nn.Module):
         idx = torch.logical_and(tgt, src)[:-1, :-1] # remove extra dimensions 
 
         i, j, k = idx.shape 
-        idx = idx.reshape(i, 1, j, 1, k).expand(i, (num_current_tokens + mem_num_tokens), j, (num_current_tokens + mem_num_tokens), k) \
-            .reshape(i * (num_current_tokens + mem_num_tokens), j * (num_current_tokens + mem_num_tokens), k)
+        if generation:
+            idx = idx.reshape(i, 1, j, 1, k).expand(i, num_current_tokens, j, (num_current_tokens + mem_num_tokens), k) \
+                .reshape(i * num_current_tokens, j * (num_current_tokens + mem_num_tokens), k)
+        else:
+            idx = idx.reshape(i, 1, j, 1, k).expand(i, num_current_tokens, j, (num_current_tokens + min(mem_num_tokens,1)), k) \
+                .reshape(i * num_current_tokens, j * (num_current_tokens + min(mem_num_tokens, 1)), k)
+            
         
         idx = idx[-tgt_length:, -src_length:]
 
         src_mask = src_mask.unsqueeze(-1).tile(1, 1, batch_size)
         src_mask[idx] = True
+        del stop_mask_shift_left, stop_mask_shift_right, tril, tgt, idx, src, shifted_tril
         return src_mask
     
 
-    def forward(self, embeds, tgt_length, stop_mask, mems=None, return_attention=False):
+    def forward(self, embeds, tgt_length, stop_mask, mems=None, generation=False, return_attention=False):
 
         def cat_modalities(xs):
             batch_size, seq_len, num_tokens, dim = xs[0].shape  # xs[0] is z 
@@ -269,34 +281,42 @@ class TransformerXL(nn.Module):
             m_xs = torch.cat(xs, dim=2)
             return m_xs.reshape(batch_size, seq_len * (num_tokens+1), dim)
 
-        num_current_tokens = embeds['z'].shape[1] if 'a' not in embeds.keys() else embeds['z'].shape[2] + embeds['a'].unsqueeze(2).shape[2]
-        
+        if generation:
+            num_current_tokens = embeds['z'].shape[1]
+        else:
+            num_current_tokens = self.num_tokens if 'a' not in embeds.keys() else embeds['z'].shape[2] + embeds['a'].unsqueeze(2).shape[2]
+    
+        mem_num_tokens = 0
         if mems is None:
             history_length = embeds[self.modality_order[0]].shape[1] - 1  # assuming dim is (B, L, T, embed_dim (or encodings_dim if continuos Tf_XL))
             if 'a' not in embeds.keys():
                 inputs = rearrange(embeds['z'], 'b l t e -> b (l t) e')
             elif self.num_tokens ==  num_current_tokens:
                 inputs = cat_modalities([embeds[name] for name in self.modality_order]) # (B, L*num_modalities, dim) , modalities = [z, a], num_modalities = 2
-            else:
-                history = cat_modalities([embeds[name][:, :history_length] for name in self.modality_order]) # (B, L*num_modalities, dim) , modalities = [z, a], num_modalities = 2
-                current = cat_modalities([embeds[name][:, history_length:] for name in self.modality_order[:num_current_tokens]])
-                inputs = torch.cat([history, current], dim=1)
+
             tgt_length = (tgt_length - 1) * num_current_tokens + num_current_tokens
             src_length = history_length * num_current_tokens + num_current_tokens
             assert inputs.shape[1] == src_length 
             src_mask = self._get_mask(src_length, src_length, inputs.device, stop_mask, num_current_tokens)
         else:
-            sequence_length = 1 if embeds['z'].dim() == 3 else embeds['z'].shape[1] # assuming dim is (B, L, embed_dim (or encodings_dim if continuos Tf_XL))
-            inputs = embeds['z']
-            tgt_length = tgt_length * num_current_tokens
-            mem_num_tokens = mems[0].shape[0]
-            src_length = mem_num_tokens + sequence_length * num_current_tokens
-            src_mask = self._get_mask(src_length, tgt_length, inputs.device, stop_mask, num_current_tokens, mem_num_tokens) # (num_tokens * inner_sequence, num_tokens * inner_sequence, batch)
+            if generation:
+                sequence_length = 1 if embeds['z'].dim() == 3 else embeds['z'].shape[1] # assuming dim is (B, L, embed_dim (or encodings_dim if continuos Tf_XL))
+                inputs = embeds['z']
+                tgt_length = tgt_length * num_current_tokens
+                mem_num_tokens = mems[0].shape[0]
+                src_length = mem_num_tokens + sequence_length * num_current_tokens  
+            else:
+                inputs = embeds['z']
+                tgt_length = inputs.shape[1]
+                mem_num_tokens = mems[0].shape[0]
+                src_length = tgt_length + mem_num_tokens
 
+        src_mask = self._get_mask(src_length, tgt_length, inputs.device, stop_mask, num_current_tokens, mem_num_tokens, generation) # (num_tokens * inner_sequence, num_tokens * inner_sequence, batch)
         positions = torch.arange(src_length - 1, -1, -1, device=inputs.device) # num_tokens * inner_sequence
         outputs = self.transformer(
             inputs, positions, attn_mask=src_mask, mems=mems, tgt_length=tgt_length, return_attention=return_attention)
         hiddens, mems, attention = outputs if return_attention else (outputs + (None,))
+        del src_mask
 
         return (hiddens, mems, attention) if return_attention else (hiddens, mems)
 

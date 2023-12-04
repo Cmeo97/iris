@@ -1,6 +1,6 @@
 import random
 from typing import List, Optional, Union
-
+import sys
 import gym
 from einops import rearrange
 import numpy as np
@@ -8,11 +8,12 @@ from PIL import Image
 import torch
 from torch.distributions.categorical import Categorical
 import torchvision
-
+from collections import deque
+from tqdm import tqdm
 
 class WorldModelEnv:
 
-    def __init__(self, tokenizer: torch.nn.Module, world_model: torch.nn.Module, device: Union[str, torch.device], env: Optional[gym.Env] = None, model: Optional[str] = None) -> None:
+    def __init__(self, tokenizer: torch.nn.Module, world_model: torch.nn.Module, device: Union[str, torch.device], env: Optional[gym.Env] = None, model: Optional[str] = None, actor: Optional[torch.nn.Module] = None) -> None:
 
         self.device = torch.device(device)
         self.world_model = world_model.to(self.device).eval()
@@ -21,6 +22,9 @@ class WorldModelEnv:
         self.keys_values_wm, self.obs_tokens, self._num_observations_tokens = None, None, None
         self.parallel_imagination = True
         self.env = env
+        self.first_obs_token = None
+        if actor is not None:
+            self.actor = actor.to(self.device).eval()
 
     @property
     def num_observations_tokens(self) -> int:
@@ -55,6 +59,76 @@ class WorldModelEnv:
     #def refresh_embeddings_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor, stop_mask: Optional[bool] = None) -> torch.FloatTensor:
     #    embeddings = self.world_model.transformer.initialize_embeddings({'z': self.world_model.embedder['z'](obs_tokens.unsqueeze(1))}, tgt_length=16, stop_mask=stop_mask)
     #    return embeddings   # (B, K, E)
+    
+    @torch.no_grad()
+    def parallel_step(self, initial_observations: Optional[torch.Tensor], horizon: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , embedder: Optional[torch.nn.Module] = None, show_pbar: bool = False) -> None:
+       
+        all_observations = []
+        all_tokens_observations = []
+        all_actions = []
+        all_logits_actions = []
+        all_values = []
+        all_rewards = []
+        all_ends = []
+        output_sequence, tokens_sequences, lengths = deque(), deque(), deque()
+        
+        obs, obs_tokens = self.reset_from_initial_observations(initial_observations[:, -1])
+        stop_mask = torch.zeros((obs_tokens.shape[0], 1), device=obs_tokens.device) # Stop Mask initialization
+        num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
+        for k in tqdm(range(horizon*num_passes), disable=not show_pbar, desc='Imagination', file=sys.stdout):
+
+                all_observations.append(obs)
+                all_tokens_observations.append(obs_tokens)
+
+                outputs_ac =  self.actor(embedder(obs_tokens)) if self.actor.latent_actor else self.actor(obs) 
+                action_token = Categorical(logits=outputs_ac.logits_actions).sample()
+                
+                action_token = action_token.clone().detach() if isinstance(action_token, torch.Tensor) else torch.tensor(action_token, dtype=torch.long)
+                action_token = token.reshape(-1, 1).to(self.device)  # (B, 1)
+                h_a = self.world_model.embedder['a'](token)
+                '---------------------------------------------------------------------------------------------------'
+                
+                #obs, reward, done, mems, obs_tokens = step(action_token, mems, should_predict_next_obs=(k < horizon - 1), stop_mask=stop_mask)
+                
+                should_predict_next_obs=(k < horizon - 1)
+                num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
+                if k == 0:
+                    outputs_wm = self.world_model({'z': action_token, 'h': h_a}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': action_token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
+                    reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                    done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                    first_token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    output_sequence.appendleft(outputs_wm.output_sequence)
+                    tokens_sequences.appendleft(first_token)
+                    tokens_cat = self.first_obs_token = first_token       # (B, K)
+                    output_sequence_cat = self.first_sequence = outputs_wm.output_sequence
+                elif k%num_passes == 0:
+                    reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                    done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                    
+                else:
+
+                    outputs_wm = self.world_model({'z': tokens_cat, 'h': output_sequence_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': tokens_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
+                    #output_sequence.append(outputs_wm.output_sequence)
+                    mems = outputs_wm.mems
+                    token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    output_sequence_cat = torch.cat([self.first_sequence, outputs_wm.output_sequence], dim=1)   # (B, 1 + K, E)
+                    tokens_cat = torch.cat([self.first_obs_token, token], dim=1)        # (B, K)
+                    #embeddings_sequence.appendleft(output_sequence_cat)
+                    tokens_sequences.appendleft(tokens_cat)
+                    lengths.appendleft(tokens_cat.shape[1])
+                
+                
+                '------------------------------------------------------------------------------------------------------'
+                all_actions.append(action_token)
+                all_logits_actions.append(outputs_ac.logits_actions)
+                all_values.append(outputs_ac.means_values)
+                all_rewards.append(torch.tensor(reward).reshape(-1, 1))
+                all_ends.append(torch.tensor(done).reshape(-1, 1))
+                stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
+                
+                
+                
+            
 
     @torch.no_grad()
     def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None) -> None:
@@ -62,7 +136,7 @@ class WorldModelEnv:
 
         num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
 
-        output_sequence, obs_tokens = [], []
+        output_sequence, obs_tokens= [], []
 
         token = action.clone().detach() if isinstance(action, torch.Tensor) else torch.tensor(action, dtype=torch.long)
         token = token.reshape(-1, 1).to(self.device)  # (B, 1)
@@ -88,56 +162,31 @@ class WorldModelEnv:
 
         elif self.model == 'irisXL-discrete':
             
-            
             #h = self.refresh_embeddings_with_initial_obs_tokens(obs_tokens=self.obs_tokens, stop_mask=stop_mask)
             h = self.world_model.embedder['a'](token)
-            if self.parallel_imagination:
-                
-                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
-                reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
-                done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
-                token = Categorical(logits=outputs_wm.logits_observations).sample()
-                output_sequence.append(outputs_wm.output_sequence)
-                obs_tokens.append(token)
-                obs_tokens_cat = torch.cat(obs_tokens, dim=1)        # (B, K)
-                output_sequence_cat = torch.cat(output_sequence, dim=1) 
-                
-                for k in range(num_passes):  # assumption that there is only one action token.
+            
 
-                    outputs_wm = self.world_model({'z': obs_tokens_cat, 'h': output_sequence_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': obs_tokens_cat}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
-                    #output_sequence.append(outputs_wm.output_sequence)
-                    if mems is not None:
-                        mems = outputs_wm.mems
+            for k in range(num_passes):  # assumption that there is only one action token.
 
-                    if k < self.num_observations_tokens:
-                        token = Categorical(logits=outputs_wm.logits_observations).sample()
-                        output_sequence.append(outputs_wm.output_sequence)
-                        obs_tokens.append(token)
-                        output_sequence_cat = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-                        obs_tokens_cat = torch.cat(obs_tokens, dim=1)        # (B, K)
-                        
-            else: 
-                for k in range(num_passes):  # assumption that there is only one action token.
+                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input, generation=True) 
+                #output_sequence.append(outputs_wm.output_sequence)
+                if mems is not None:
+                    mems = outputs_wm.mems
 
-                    outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input) if self.world_model.embedding_input else self.world_model({'z': token}, mems=mems, stop_mask=stop_mask, tgt_length=1) 
-                    #output_sequence.append(outputs_wm.output_sequence)
-                    if mems is not None:
-                        mems = outputs_wm.mems
+                if k == 0:
+                    reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                    done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
 
-                    if k == 0:
-                        reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
-                        done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                if k < self.num_observations_tokens:
+                    token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    h = outputs_wm.output_sequence
+                    obs_tokens.append(token)
 
-                    if k < self.num_observations_tokens:
-                        token = Categorical(logits=outputs_wm.logits_observations).sample()
-                        h = outputs_wm.output_sequence
-                        obs_tokens.append(token)
+        #output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
+        self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
-            output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-            self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
-
-            obs = self.decode_obs_tokens() if should_predict_next_obs else None
-            return obs, reward, done, mems, self.obs_tokens
+        obs = self.decode_obs_tokens() if should_predict_next_obs else None
+        return obs, reward, done, mems, self.obs_tokens
 
                 
                 

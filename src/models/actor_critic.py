@@ -200,8 +200,8 @@ class ActorCritic(nn.Module):
         else:
             embedder = wm_env.world_model.embedder.embedding_tables[1].eval()
             mems = None
+            
         obs, obs_tokens = wm_env.reset_from_initial_observations(initial_observations[:, -1])
-        
         stop_mask = torch.zeros((obs_tokens.shape[0], 1), device=obs_tokens.device) # Stop Mask initialization
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Imagination', file=sys.stdout):
         

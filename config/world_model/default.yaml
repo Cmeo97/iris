@@ -34,5 +34,7 @@ wm_sequence_length: 340
 wm_train_steps: 1
 wm_memory_length: 17
 wm_discount_threshold: 0.1
-regularization: False
+regularization_post_quant: False
+regularization_tokens: False
+regularization_embeddings: False
 embedding_input: False

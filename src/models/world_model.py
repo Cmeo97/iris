@@ -24,6 +24,15 @@ class WorldModelOutput:
     mems: torch.FloatTensor
 
 @dataclass
+class WorldModelOutputEmbs:
+    output_sequence: torch.FloatTensor
+    embeddings: torch.FloatTensor
+    logits_observations: torch.FloatTensor
+    logits_rewards: torch.FloatTensor
+    logits_ends: torch.FloatTensor
+    mems: torch.FloatTensor
+
+@dataclass
 class ContinuosWorldModelOutput:
     output_sequence: torch.FloatTensor
     encodings: torch.FloatTensor
@@ -40,6 +49,18 @@ class WorldModel(nn.Module):
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
         act_tokens_pattern[-1] = 1
         obs_tokens_pattern = 1 - act_tokens_pattern
+        self.regularization_post_quant = config.regularization_post_quant
+        self.embedding_input = config.embedding_input
+        self.regularization_tokens = config.regularization_tokens
+        
+        
+        
+        self.regularization_embeddings = config.regularization_embeddings
+        self.regularization = (self.regularization_post_quant or self.regularization_tokens or self.regularization_embeddings)
+        if self.regularization_tokens:
+            self.loss_iter = []
+        if self.regularization_embeddings:
+            self.loss_iter_embeds = []
 
 
         if self.config.model== 'iris':
@@ -188,12 +209,21 @@ class WorldModel(nn.Module):
             )
         )
 
+        self.shift_action_token = Head(
+            max_blocks=config.max_blocks,
+            block_mask=act_tokens_pattern,
+            head_module=nn.Sequential(
+                nn.ReLU(),
+            )
+        )
+
+
         self.apply(init_weights)
 
     def __repr__(self) -> str:
         return "world_model"
 
-    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None, mems: Optional[list] = None, stop_mask: Optional[bool] = None, tgt_length: Optional[int] = None, embedding_input:Optional[bool] = False) -> WorldModelOutput:
+    def forward(self, inputs: dict, past_keys_values: Optional[KeysValues] = None, mems: Optional[list] = None, stop_mask: Optional[bool] = None, tgt_length: Optional[int] = None, embedding_input:Optional[bool] = False, generation: Optional[bool] = False) -> WorldModelOutput:
 
         if self.config.model == 'iris':
             if isinstance(inputs, torch.cuda.LongTensor):
@@ -216,20 +246,24 @@ class WorldModel(nn.Module):
 
         elif self.config.model == 'irisXL-discrete' or self.config.model == 'irisXL-continuos':
 
-            if mems is not None and 'a' not in inputs.keys():
+            if generation:
                 if embedding_input:
                     inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
                 else:
                     inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
                 num_steps = inputs['z'].size(1) if inputs['z'].dim() == 3 else inputs['z'].size(1)*inputs['z'].size(2)
                 prev_steps = 16 + mems[0].shape[0] # num default # of obs tokens
-            elif embedding_input and mems is not None:
-                    inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
             else: 
-                num_steps, prev_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1), 0  # (B, L, T) -> L*(T+1), 1 for action token
-                
+                if self.regularization and mems is not None:
+                    actions = inputs['a']
+                    inputs = inputs['z']
+                    num_steps, prev_steps = inputs.shape[1], mems[0].shape[0]
+                    inputs[:, self.shift_action_token.compute_slice(num_steps, prev_steps)] = actions
+                    inputs = {'z': inputs}
+                else:
+                    num_steps, prev_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1), 0  # (B, L, T) -> L*(T+1), 1 for action token 
             
-            h, mems = self.transformer(inputs, tgt_length, stop_mask, mems)
+            h, mems = self.transformer(inputs, tgt_length, stop_mask, mems, generation)
 
             logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
@@ -237,16 +271,16 @@ class WorldModel(nn.Module):
                 logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
                 if embedding_input:
                     embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
+                    return WorldModelOutputEmbs(h, embeddings, logits_observations, logits_rewards, logits_ends, mems)
                 else: 
-                    embeddings = h
-                return WorldModelOutput(embeddings, logits_observations, logits_rewards, logits_ends, mems)
+                    return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends, mems)
             else:
                 encodings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
                 return ContinuosWorldModelOutput(h, encodings, logits_rewards, logits_ends)
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
-        regularization = kwargs.pop('regularization')
-        self.embedding_input = kwargs.pop('embedding_input')
+        
+        
         if self.config.model == 'iris':
             with torch.no_grad():
                 obs_tokens = tokenizer.encode(batch['observations'], should_preprocess=True).tokens  # (B, L, K)
@@ -260,9 +294,11 @@ class WorldModel(nn.Module):
             labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
             logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
-            loss_obs = F.cross_entropy(logits_observations, labels_observations)
+            loss_obs = F.cross_entropy(logits_observations, labels_observations.reshape(-1))
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+
+            loss = LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
 
         elif self.config.model == 'irisXL-continuos':
             with torch.no_grad():
@@ -279,9 +315,9 @@ class WorldModel(nn.Module):
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
             
-            return LossWithIntermediateLosses(loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embedding)
+            loss = LossWithIntermediateLosses(loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embedding)
 
-        elif self.config.model == 'irisXL-discrete':
+        elif self.config.model == 'irisXL-discrete' and not self.regularization:
             with torch.no_grad():
                 obs_encoded = tokenizer.encode(batch['observations'], should_preprocess=True)  # (B, L, K)
                 obs_tokens, obs_zq = obs_encoded.tokens, obs_encoded.z_quantized
@@ -294,49 +330,92 @@ class WorldModel(nn.Module):
             labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
 
             logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
-            loss_obs = F.cross_entropy(logits_observations, labels_observations)
+            loss_obs = F.cross_entropy(logits_observations, labels_observations.reshape(-1))
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+
+            loss = LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
+
             if self.embedding_input:
-                embeddings = outputs.output_sequence[:, :-1]
+                embeddings = outputs.embeddings[:, :-1]
                 loss_embedding = F.mse_loss(embeddings, rearrange(inputs['z'], 'b s t o -> b (s t) o')[:, 1:])
-                
-                return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embedding)
+                loss.loss_total += loss_embedding
+                loss.intermediate_losses['loss_embeddings'] = loss_embedding    
+       
             
-            
-            
-        elif self.config.model == 'irisXL-discrete' and regularization:
+        elif self.config.model == 'irisXL-discrete' and self.regularization:
             with torch.no_grad():
                 obs_encoded = tokenizer.encode(batch['observations'], should_preprocess=True)  # (B, L, K)
                 obs_tokens, obs_zq = obs_encoded.tokens, obs_encoded.z_quantized
-                post_quant_zq = tokenizer.get_post_zq(obs_zq)
-               
+                if self.regularization_post_quant:
+                    post_quant_z_gt = tokenizer.get_post_zq(obs_zq[:,1:])
+            
             tokens = {'z': obs_tokens, 'a': batch['actions']}
             inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
+            mems = None
+            actions = self.embedder['a'](batch['actions'])
 
-            for i in range(obs_tokens.shape[2]+1):  # extra iteration to account for action token 
-                outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=self.embedding_input)
-                tokens = {'z': Categorical(logits=outputs.logits_observations).sample(), 'a': batch['actions']}
-                inputs = {name: mod(tokens[name]) for name, mod in self.embedder.items()}
-                if self.embedding_input:
-                    inputs['h'] = outputs.output_sequence
+            for i in range(self.config.tokens_per_block):  
+                outputs = self(inputs, mems=mems, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=self.embedding_input, generation=False)
+
+                if i == 0:
+                    labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
+                    logits_observations = rearrange(outputs.logits_observations[:, :-1], 'b t o -> (b t) o')
+                    loss_obs = F.cross_entropy(logits_observations, labels_observations.reshape(-1))
+                    loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
+                    loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+                    if self.embedding_input:
+                        embeddings = outputs.embeddings[:, :-1]
+                        labels_embeddings = rearrange(inputs['z'], 'b s t o -> b (s t) o')[:, 1:]
+                        loss_embedding = F.mse_loss(embeddings, labels_embeddings)
+
+                next_input = outputs.output_sequence
+                next_input[:, self.head_observations.compute_slice(num_steps=next_input.shape[1], prev_steps=i)] = self.embedder['z'](Categorical(logits=outputs.logits_observations).sample())
+                inputs = {'z': next_input , 'a': actions}
+                mems = outputs.mems
                 
-                    
+           
+                if self.regularization_tokens:
+                    labels_observations_reg = labels_observations[:, i:].reshape(-1)
+                    logits = outputs.logits_observations[:, :-1] if i < 16 else outputs.logits_observations[:, :-2]
+                    logits_observations_reg = rearrange(logits, 'b t o -> (b t) o')
+                    self.loss_iter.append(F.cross_entropy(logits_observations_reg, labels_observations_reg).reshape(-1))
 
-            i = i - 1 # one extra iteration is done to account for action token, but to remove tokens of the last observation I need only i - 1 then 
-            labels_observations, _, _ = self.compute_labels_world_model(obs_tokens[:, i:], batch['rewards'], batch['ends'], batch['mask_padding'][:, i:])
+                if self.regularization_embeddings:
+                    labels_embeddings_reg = rearrange(labels_embeddings[:, i:], 'b t o -> (b t) o')
+                    embeds = outputs.embeddings[:, :-1] if i < 16 else outputs.embeddings[:, :-2]
+                    embeds_observations_reg = rearrange(embeds, 'b t o -> (b t) o') 
+                    self.loss_iter_embeds.append(F.mse_loss(embeds_observations_reg, labels_embeddings_reg).reshape(-1))
 
-            logits_observations = rearrange(outputs.logits_observations[:, :-(1 + i)], 'b t o -> (b t) o')
-            loss_obs = F.cross_entropy(logits_observations, labels_observations)
-            
-            tokens = Categorical(logits=outputs.logits_observations).sample()
-            post_quant_z = tokenizer.post_quant_conv(tokenizer.embedding(tokens))
-            loss_post_quant = F.mse_loss(post_quant_z[:, :-(1 + i)], post_quant_zq[:, (1 + i):])
-            
-            return LossWithIntermediateLosses(loss_obs=loss_obs, loss_regularization=loss_post_quant)
-            
+            loss = LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
 
-        return LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
+            if self.embedding_input:
+                loss.loss_total += loss_embedding
+                loss.intermediate_losses['loss_embeddings'] = loss_embedding    
+
+            if self.regularization_post_quant:
+                tokens = Categorical(logits=outputs.logits_observations[:,:-1]).sample()
+                post_quant_z = tokenizer.post_quant_conv(rearrange(tokenizer.embedding(tokens), 'b (l t) e -> (b l) e t', l = 19).reshape(*post_quant_z_gt.shape).contiguous())
+                loss_post_quant = F.mse_loss(post_quant_z, post_quant_z_gt)
+                loss.loss_total += loss_post_quant 
+                loss.intermediate_losses['loss_reg_post_quant'] = loss_post_quant 
+                
+            if self.regularization_embeddings:
+                loss_reg_embeds = torch.cat(self.loss_iter_embeds, dim=0).mean()
+                loss.loss_total += loss_reg_embeds
+                loss.intermediate_losses['loss_reg_embeds'] = loss_reg_embeds
+                self.loss_iter_embeds = []
+                
+            if self.regularization_tokens:
+                loss_reg_tokens = torch.cat(self.loss_iter, dim=0).mean()
+                loss.loss_total += loss_reg_tokens
+                loss.intermediate_losses['loss_reg_tokens'] = loss_reg_tokens
+                self.loss_iter = []
+            
+        return loss
+
+            
+    
 
     def compute_labels_world_model(self, obs_tokens: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done
@@ -344,7 +423,7 @@ class WorldModel(nn.Module):
         labels_observations = rearrange(obs_tokens.masked_fill(mask_fill.unsqueeze(-1).expand_as(obs_tokens), -100), 'b t k -> b (t k)')[:, 1:]
         labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
         labels_ends = ends.masked_fill(mask_fill, -100)
-        return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)
+        return labels_observations, labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
     def compute_labels_continuos_world_model(self, encodings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done

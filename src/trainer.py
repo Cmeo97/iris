@@ -138,7 +138,7 @@ class Trainer:
         w = self.cfg.training.sampling_weights
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, sequence_length=1, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
+            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, sequence_length=self.cfg.common.sequence_length, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
         self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
@@ -188,7 +188,7 @@ class Trainer:
         cfg_actor_critic = self.cfg.evaluation.actor_critic
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=1)
+            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=self.cfg.common.sequence_length)
 
         if epoch > cfg_world_model.start_after_epochs:
             metrics_world_model = self.eval_component(self.agent.world_model, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer, **cfg_world_model)
@@ -247,7 +247,7 @@ class Trainer:
     
     @torch.no_grad()
     def inspect_world_model(self, epoch: int) -> None:
-        batch = self.train_dataset.sample_batch(batch_num_samples=1, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
+        batch = self.train_dataset.sample_batch(batch_num_samples=5, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
         recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
 
         def save_image_with_slots(observations, recons, save_dir, epoch, suffix='sample'):
