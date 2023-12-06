@@ -301,11 +301,9 @@ class WorldModel(nn.Module):
             loss = LossWithIntermediateLosses(loss_obs=loss_obs, loss_rewards=loss_rewards, loss_ends=loss_ends)
 
         elif self.config.model == 'irisXL-continuos':
-            with torch.no_grad():
-                obs_encodings = tokenizer.encode(batch['observations'], should_preprocess=True).z_quantized  # (B, L, K, E)
-
+            
+            obs_encodings = tokenizer.encode(batch['observations'], should_preprocess=True).z_quantized  # (B, L, K, E)
             inputs = {'z': obs_encodings, 'a': batch['actions']}
-        
             outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_encodings.shape[1])
 
             labels_embeddings, labels_rewards, labels_ends = self.compute_labels_continuos_world_model(obs_encodings, batch['rewards'], batch['ends'], batch['mask_padding'])
@@ -356,7 +354,7 @@ class WorldModel(nn.Module):
             actions = self.embedder['a'](batch['actions'])
 
             for i in range(self.config.tokens_per_block):  
-                outputs = self(inputs, mems=mems, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=self.embedding_input, generation=False)
+                outputs = self(inputs, mems=mems, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1], embedding_input=(self.embedding_input or self.regularization_embeddings), generation=False)
 
                 if i == 0:
                     labels_observations, labels_rewards, labels_ends = self.compute_labels_world_model(obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding'])
@@ -364,7 +362,7 @@ class WorldModel(nn.Module):
                     loss_obs = F.cross_entropy(logits_observations, labels_observations.reshape(-1))
                     loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
                     loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
-                    if self.embedding_input:
+                    if self.embedding_input or self.regularization_embeddings:
                         embeddings = outputs.embeddings[:, :-1]
                         labels_embeddings = rearrange(inputs['z'], 'b s t o -> b (s t) o')[:, 1:]
                         loss_embedding = F.mse_loss(embeddings, labels_embeddings)
@@ -428,7 +426,7 @@ class WorldModel(nn.Module):
     def compute_labels_continuos_world_model(self, encodings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done
         mask_fill = torch.logical_not(mask_padding)
-        labels_observations = rearrange(encodings.masked_fill(mask_fill.unsqueeze(-1).expand_as(encodings), -100), 'b t k -> b (t k)')[:, 1:]
+        labels_observations = rearrange(encodings.masked_fill(mask_fill.unsqueeze(-1).expand_as(encodings), -100), 'b t k e -> b (t k e)')[:, 1:]
         labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
         labels_ends = ends.masked_fill(mask_fill, -100)
         return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)

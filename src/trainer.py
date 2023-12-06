@@ -134,6 +134,10 @@ class Trainer:
         cfg_tokenizer = self.cfg.training.tokenizer
         cfg_world_model = self.cfg.training.world_model
         cfg_actor_critic = self.cfg.training.actor_critic
+        
+        if self.cfg.world_model.regularization_post_quant:
+            cfg_world_model.batch_num_samples = 16
+            
 
         w = self.cfg.training.sampling_weights
 
@@ -186,6 +190,9 @@ class Trainer:
         cfg_tokenizer = self.cfg.evaluation.tokenizer
         cfg_world_model = self.cfg.evaluation.world_model
         cfg_actor_critic = self.cfg.evaluation.actor_critic
+        
+        if self.cfg.world_model.regularization_post_quant:
+            cfg_world_model.batch_num_samples = 16
 
         if epoch > cfg_tokenizer.start_after_epochs:
             metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=self.cfg.common.sequence_length)
