@@ -138,4 +138,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+clevr_robot_env/
+data/
+**.npy
+*.png
 *.sh
+

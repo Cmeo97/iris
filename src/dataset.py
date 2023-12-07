@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 
 import psutil
 import torch
+import torchvision.transforms as transforms
+from einops import rearrange
 
 from episode import Episode
 
@@ -23,6 +25,15 @@ class EpisodesDataset:
 
     def __len__(self) -> int:
         return len(self.episodes)
+
+    def _check_upscale(self, upscale: Optional[bool] = False) -> None:
+        self.upscale = upscale
+        if upscale:
+            self.transform = transforms.Compose([
+                lambda image: image.float() / 255.0,
+                transforms.Resize(size=224, interpolation=transforms.InterpolationMode.BICUBIC),
+                lambda image: image.clamp(0.0, 1.0),
+            ])
 
     def clear(self) -> None:
         self.episodes = deque()
@@ -94,7 +105,15 @@ class EpisodesDataset:
         batch = {}
         for k in episodes_segments[0]:
             batch[k] = torch.stack([e_s[k] for e_s in episodes_segments])
-        batch['observations'] = batch['observations'].float() / 255.0  # int8 to float and scale
+
+        if self.upscale:
+            b = batch['observations'].shape[0]
+            batch['observations'] = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
+            batch['observations'] = self.transform(batch['observations'])  # int8 to float and scale and resize
+            batch['observations'] = rearrange(batch['observations'], '(b t) c h w -> b t c h w', b=b)
+        else:
+            batch['observations'] = batch['observations'].float() / 255.0  # int8 to float and scale
+
         return batch
 
     def traverse(self, batch_num_samples: int, chunk_size: int):
@@ -122,6 +141,14 @@ class EpisodesDataset:
             self.episode_id_to_queue_idx[episode_id] = len(self.episodes)
             self.episodes.append(episode)
 
+    def save_episodes(self, directory: Path) -> None:
+        # append all episodes to list
+        observations = []
+        for episode_id in range(self.num_seen_episodes):
+            observations.append(self.get_episode(episode_id).observations)
+        observations = torch.cat(observations, dim=0)
+        print(observations.min(), observations.max(), type(observations))
+        torch.save(observations, directory / 'observations.pt')
 
 class EpisodesDatasetRamMonitoring(EpisodesDataset):
     """

@@ -14,7 +14,7 @@ from models.tokenizer import Tokenizer
 from dataset import Batch
 from envs.world_model_env import WorldModelEnv
 from models.tokenizer import Tokenizer
-from models.world_model import WorldModel
+from models.world_model import WorldModel, OCWorldModel
 from utils import compute_lambda_returns, LossWithIntermediateLosses
 from einops import rearrange
 from .nets import MLP
@@ -229,7 +229,7 @@ class ActorCritic(nn.Module):
         rewards=torch.cat(all_rewards, dim=1).to(device),                       # (B, T)
         ends=torch.cat(all_ends, dim=1).to(device),                             # (B, T)
         )
-        
+
         
     @torch.no_grad()
     def rollout(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel, horizon: int, show_pbar: bool = False) -> ImagineOutput:
@@ -245,6 +245,9 @@ class ActorCritic(nn.Module):
         all_rewards = []
         all_ends = []
         all_observations = []
+        all_colors = []
+        all_masks = []
+
         if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
             mems = wm_env.world_model.transformer.transformer.init_mems()  # Memory Initialization 
         else:
@@ -255,16 +258,25 @@ class ActorCritic(nn.Module):
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Rollout', file=sys.stdout):
 
             action_token = rearrange(batch['actions'][:, k], 'b -> b 1 1')
-            obs, reward, done, mems, _ = wm_env.step(action_token, mems, should_predict_next_obs=True, stop_mask=stop_mask)
-
+            if tokenizer.slot_based:
+                obs, reward, done, mems, color, mask, _ = wm_env.step(action_token, should_predict_next_obs=True, should_return_slots=True)
+                all_colors.append(color)
+                all_masks.append(mask)
+            else:
+                obs, reward, done, mems, _ = wm_env.step(action_token, mems, should_predict_next_obs=True, stop_mask=stop_mask)
 
             all_actions.append(action_token)
             all_rewards.append(torch.tensor(reward).reshape(-1, 1))
             all_ends.append(torch.tensor(done).reshape(-1, 1))
-            stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
             all_observations.append(obs)
             
+            stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
+        
         all_observations = torch.stack(all_observations, dim=1) # (B, T, C, H, W)
-
-        return all_observations
+        if tokenizer.slot_based:
+            all_colors = torch.stack(all_colors, dim=1)
+            all_masks = torch.stack(all_masks, dim=1)
+            return all_observations, all_colors, all_masks
+        else:
+            return all_observations
 

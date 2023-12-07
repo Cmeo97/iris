@@ -1,0 +1,23 @@
+train:
+  _target_: envs.make_billiards
+  size: 64
+  # max_episode_steps: 1000
+  coord_limits: 10
+  num_objects: 3
+  t: 1.
+  object_radius: 1
+  object_mass: 1.
+  granularity: 50
+  friction_coefficient: 0
+
+test:
+  _target_: ${..train._target_}
+  size: ${..train.size}
+  # max_episode_steps: 300
+  coord_limits: ${..train.coord_limits}
+  num_objects: ${..train.num_objects}
+  t: ${..train.t}
+  object_radius: ${..train.object_radius}
+  object_mass: ${..train.object_mass}
+  granularity: ${..train.granularity}
+  friction_coefficient: ${..train.friction_coefficient}

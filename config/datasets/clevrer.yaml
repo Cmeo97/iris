@@ -1,0 +1,8 @@
+train:
+  _target_: clevrer_dataset.CLEVRERDataset
+  split: train
+  load_mask: False
+test:
+  _target_: clevrer_dataset.CLEVRERDataset
+  split: val
+  load_mask: False

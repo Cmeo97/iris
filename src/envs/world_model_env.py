@@ -26,6 +26,8 @@ class WorldModelEnv:
         if actor is not None:
             self.actor = actor.to(self.device).eval()
 
+        self.slot_based = tokenizer.slot_based
+
     @property
     def num_observations_tokens(self) -> int:
         return self._num_observations_tokens
@@ -38,14 +40,16 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def reset_from_initial_observations(self, observations: torch.FloatTensor) -> torch.FloatTensor:
+
         self.obs_tokens = self.tokenizer.encode(observations, should_preprocess=True).tokens    # (B, C, H, W) -> (B, K)
         _, num_observations_tokens = self.obs_tokens.shape
         if self.num_observations_tokens is None:
             self._num_observations_tokens = num_observations_tokens
         if self.model == 'iris':
             _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
+        #self.obs_logits = self.tokenizer.encode_logits(outputs.z) # need to use logits instead of tokens when using dVAE, from nakano_dev
         return self.decode_obs_tokens(), self.obs_tokens
-    
+
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
@@ -131,13 +135,10 @@ class WorldModelEnv:
             
 
     @torch.no_grad()
-    def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None) -> None:
+    def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None, should_return_slots: Optional[bool] = False) -> None:
         #assert self.keys_values_wm is not None and self.num_observations_tokens is not None
-
         num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
-
         output_sequence, obs_tokens= [], []
-
         token = action.clone().detach() if isinstance(action, torch.Tensor) else torch.tensor(action, dtype=torch.long)
         token = token.reshape(-1, 1).to(self.device)  # (B, 1)
 
@@ -164,8 +165,6 @@ class WorldModelEnv:
             
             #h = self.refresh_embeddings_with_initial_obs_tokens(obs_tokens=self.obs_tokens, stop_mask=stop_mask)
             h = self.world_model.embedder['a'](token)
-            
-
             for k in range(num_passes):  # assumption that there is only one action token.
 
                 outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input, generation=True) 
@@ -185,11 +184,9 @@ class WorldModelEnv:
         #output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
         self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
 
-        obs = self.decode_obs_tokens() if should_predict_next_obs else None
-        return obs, reward, done, mems, self.obs_tokens
-
-                
-                
+        obs, color, mask = self.decode_obs_tokens() if should_predict_next_obs else  None, None, None
+        return obs, reward, done, mems, color, mask, self.obs_tokens if should_return_slots else obs, reward, done, mems, self.obs_tokens
+      
 
     @torch.no_grad()
     def render_batch(self) -> List[Image.Image]:
@@ -199,10 +196,17 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def decode_obs_tokens(self) -> List[Image.Image]:
-        embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)
-        z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
-        rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
-        return torch.clamp(rec, 0, 1)
+        color, mask = None, None
+        if self.slot_based:
+            # embedded_tokens = self.tokenizer.decode_logits(self.obs_logits)     # (B, K, E) if using dVAE
+            embedded_tokens = self.tokenizer.quantizer.get_embedding(self.obs_tokens)     # (B, K, E) if using VQVAE-based
+            z = rearrange(embedded_tokens, 'b (k t) e -> b e k t', k=self.tokenizer.num_slots, t=self.tokenizer.tokens_per_slot)
+            rec, color, mask = self.tokenizer.decode_slots(z, should_postprocess=True)         # (B, C, H, W)
+        else:
+            embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)
+            z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
+            rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
+        return torch.clamp(rec, 0, 1), color, mask
 
     @torch.no_grad()
     def render(self):
