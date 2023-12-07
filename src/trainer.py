@@ -69,6 +69,8 @@ class Trainer:
             wandb.save(str(config_path))
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "src"), dst="./src")
             shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "scripts"), dst="./scripts")
+            if cfg.common.use_pretrained:
+                shutil.copytree(src=(Path(hydra.utils.get_original_cwd()) / "saved_models"), dst="./saved_models")
             self.ckpt_dir.mkdir(exist_ok=False, parents=False)
             self.media_dir.mkdir(exist_ok=False, parents=False)
             self.episode_dir.mkdir(exist_ok=False, parents=False)
@@ -131,8 +133,12 @@ class Trainer:
         #     print(name)
         #     param.requires_grad = False
 
+        if self.cfg.common.use_pretrained:
+            self.agent.load(Path(hydra.utils.get_original_cwd()) / 'saved_models' / 'dinosaur_sam.pt', device=self.device, strict=False)
+
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
             # if epoch > 200:
+            #     self.agent.tokenizer.slot_attn.prior_class = "gru"
             #     for name, param in self.agent.tokenizer.quantizer.named_parameters():
             #         param.requires_grad = True
             #     self.agent.tokenizer.tau = 1.0
@@ -180,7 +186,7 @@ class Trainer:
         w = self.cfg.training.sampling_weights
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=1, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
+            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=4, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
         self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
@@ -234,7 +240,7 @@ class Trainer:
         cfg_actor_critic = self.cfg.evaluation.actor_critic
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=1)
+            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=4)
 
         if epoch > cfg_world_model.start_after_epochs:
             metrics_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer)
@@ -354,7 +360,7 @@ class Trainer:
         else:
             from make_reconstructions import reconstruct_through_tokenizer
 
-        num_samples = 20
+        num_samples = 10
 
         vis_dir = self.reconstructions_dir
         if self.cfg.common.resume:
@@ -370,52 +376,72 @@ class Trainer:
         to_log += self.test_collector.collect(self.agent, epoch=0, **self.cfg.collection.test.config)
         # to_log += self.eval_agent(epoch=0)
 
-        train_batch = self._to_device(self.train_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
-        test_batch = self._to_device(self.test_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
+        batch = self.train_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=20)
+        for burn_in in [1, 5]:
+            recons, _, _ = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, burn_in=burn_in, horizon=self.cfg.evaluation.actor_critic.horizon, show_pbar=True)
 
-        inputs = rearrange(train_batch['observations'], 'b t c h w -> (b t) c h w')
-        outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
-        b, t, _, _, _ = train_batch['observations'].size()
-        if try_slots:
-            recons, colors, masks = outputs
-            recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
-            colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
-            masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
-        else:
-            recons = outputs
-            recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
+            b, t, _, h, w = batch['observations'].size()
+            for i in range(b):
+                obs = batch['observations'][i].cpu() # (t c h w)
+                recon = recons[i].cpu() # (t c h w)
+                full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
+                full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+                full_plot = full_plot.view(-1, 3, h, w)  # (H*W, 3, D, D)
 
-        for i in tqdm(range(num_samples)):
-            train_obs = train_batch['observations'][i].cpu() # (t c h w)
-            recon_obs = recons[i].cpu() # (t c h w)
+                save_image(full_plot, vis_dir / f'train_burn{burn_in}_sample_{i:03d}.png', nrow=t)
 
-            full_plot = torch.cat([train_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
-            if try_slots:
-                color = colors[i].cpu()
-                mask = masks[i].cpu()
-                subimage = color * mask
-                mask = mask.repeat(1,1,3,1,1)
-                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
-            full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
-            full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+        #########
+        # train_batch = self._to_device(self.train_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
+        # test_batch = self._to_device(self.test_dataset.sample_batch(batch_num_samples=num_samples, sequence_length=self.cfg.common.sequence_length))
 
-            save_image(full_plot, vis_dir / f'a_train_{i}.png', nrow=t)
+        # train_batch['observations'] = torch.cat([train_batch['observations'], train_batch['observations']], dim=0)
+        # make_reconstructions_with_slots_from_batch(train_batch, save_dir=vis_dir, epoch=0, tokenizer=self.agent.tokenizer)
 
-        inputs = rearrange(test_batch['observations'], 'b t c h w -> (b t) c h w')
-        outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
-        b, t, _, _, _ = test_batch['observations'].size()
-        for i in tqdm(range(num_samples)):
-            test_obs = test_batch['observations'][i].cpu()
-            recon_obs = recons[i].cpu() # (t c h w)
+        #########
 
-            full_plot = torch.cat([test_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
-            if try_slots:
-                color = colors[i].cpu()
-                mask = masks[i].cpu()
-                subimage = color * mask
-                mask = mask.repeat(1,1,3,1,1)
-                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
-            full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
-            full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+        # inputs = rearrange(train_batch['observations'], 'b t c h w -> (b t) c h w')
+        # outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
+        # b, t, _, _, _ = train_batch['observations'].size()
+        # if try_slots:
+        #     recons, colors, masks = outputs
+        #     recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
+        #     colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t)
+        #     masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t)
+        # else:
+        #     recons = outputs
+        #     recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t)
 
-            save_image(full_plot, vis_dir / f'a_test_{i}.png', nrow=t)
+        # for i in tqdm(range(num_samples)):
+        #     train_obs = train_batch['observations'][i].cpu() # (t c h w)
+        #     recon_obs = recons[i].cpu() # (t c h w)
+
+        #     full_plot = torch.cat([train_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
+        #     if try_slots:
+        #         color = colors[i].cpu()
+        #         mask = masks[i].cpu()
+        #         subimage = color * mask
+        #         mask = mask.repeat(1,1,3,1,1)
+        #         full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+        #     full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+        #     full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+        #     save_image(full_plot, vis_dir / f'a_train_{i}.png', nrow=t)
+
+        # inputs = rearrange(test_batch['observations'], 'b t c h w -> (b t) c h w')
+        # outputs = reconstruct_through_tokenizer(inputs, self.agent.tokenizer)
+        # b, t, _, _, _ = test_batch['observations'].size()
+        # for i in tqdm(range(num_samples)):
+        #     test_obs = test_batch['observations'][i].cpu()
+        #     recon_obs = recons[i].cpu() # (t c h w)
+
+        #     full_plot = torch.cat([test_obs.unsqueeze(1), recon_obs.unsqueeze(1)], dim=1) # (t 2 c h w)
+        #     if try_slots:
+        #         color = colors[i].cpu()
+        #         mask = masks[i].cpu()
+        #         subimage = color * mask
+        #         mask = mask.repeat(1,1,3,1,1)
+        #         full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+        #     full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+        #     full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+        #     save_image(full_plot, vis_dir / f'a_test_{i}.png', nrow=t)
