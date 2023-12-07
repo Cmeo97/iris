@@ -40,13 +40,15 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
     # check_batch(batch)
 
     inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
-    # inputs = batch['observations'] # video
+    if tokenizer.slot_attn.is_video:
+        inputs = batch['observations'] # video
     outputs = reconstruct_through_tokenizer_with_slots(inputs, tokenizer)
     b, t, _, _, _ = batch['observations'].size()
     recons, colors, masks = outputs
-    recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t) # commentout for video
-    colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
-    masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
+    if not tokenizer.slot_attn.is_video:
+        recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t) # commentout for video
+        colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
+        masks = rearrange(masks, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
 
     save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch)
 

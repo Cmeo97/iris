@@ -548,6 +548,7 @@ class SAConfig:
     iters: int
     channels_enc: int
     token_dim: int
+    prior_class: str
 
     @property
     def slot_dim(self):
@@ -722,6 +723,8 @@ class SlotAttention(nn.Module):
         
         self._init_params()
 
+        self.is_video = False
+
     def _init_params(self):
         for name, tensor in self.named_parameters():
             if name.endswith(".bias"):
@@ -798,16 +801,25 @@ class SlotAttentionVideo(nn.Module):
 
         hidden_dim = max(config.slot_dim, hidden_dim)
 
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(config.slot_dim, hidden_dim),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(hidden_dim, config.slot_dim),
-        # )
         self.mlp = nn.Sequential(
             nn.Linear(config.slot_dim, config.slot_dim*4),
             nn.ReLU(inplace=True),
             nn.Linear(config.slot_dim*4, config.slot_dim),
         )
+
+        if config.prior_class.lower() == 'mlp':
+            self.prior = nn.Sequential(
+                nn.Linear(config.slot_dim, config.slot_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(config.slot_dim, config.slot_dim),
+            )
+        elif config.prior_class.lower() == 'gru':
+            self.prior = nn.GRU(config.slot_dim, config.slot_dim)
+        elif config.prior_class.lower() == 'none' or config.prior_class.lower() == 'keep':
+            self.prior = None
+        else:
+            raise NotImplementedError("prior class not implemented")
+        self.prior_class = config.prior_class
 
         self.predictor = TransformerEncoder(num_blocks=1, d_model=config.slot_dim, num_heads=4, dropout=0.1)
 
@@ -817,6 +829,8 @@ class SlotAttentionVideo(nn.Module):
         self.slot_dim = config.slot_dim
         
         self._init_params()
+
+        self.is_video = True
 
     def _init_params(self):
         for name, tensor in self.named_parameters():
@@ -845,7 +859,12 @@ class SlotAttentionVideo(nn.Module):
         k *= self.scale
 
         slots_list = []
+        slots_init_list = []
+        hidden = None
         for t in range(T):
+            slots_init = slots
+            slots_init_list += [slots_init]
+
             for i in range(self.iters):
                 slots_prev = slots
 
@@ -854,8 +873,17 @@ class SlotAttentionVideo(nn.Module):
 
                 dots = torch.bmm(k[:, t], q.transpose(-1, -2))
                 attn = dots.softmax(dim=-1) + self.eps
+
+                # attn_discrete = attn_c.round(decimals=0)
+                # attn = attn_c + (attn_c - attn_discrete).detach()
+
                 attn = attn / torch.sum(attn, dim=-2, keepdim=True)
                 updates = torch.bmm(attn.transpose(-1, -2), v[:, t])
+
+                # slots_dots = torch.bmm(updates, slots_prev.transpose(-1, -2))
+                # slots_attn = slots_dots.softmax(dim=-1)
+                # slots_attn = (slots_attn / torch.sum(slots_attn, dim=-2, keepdim=True)).round(decimals=0)
+                # updates = torch.bmm(slots_attn.transpose(-1, -2), updates)
 
                 slots = self.gru(updates.view(-1, self.slot_dim),
                                  slots_prev.view(-1, self.slot_dim))
@@ -867,12 +895,25 @@ class SlotAttentionVideo(nn.Module):
                 
             slots_list += [slots]
 
+            if t > 0:
+                if self.prior_class.lower() == 'mlp':
+                    slots = self.prior(slots_init)
+                elif self.prior_class.lower() == 'gru':
+                    slots, hidden = self.prior(slots_init.view(-1, self.slot_dim), hidden)
+                    slots = slots.view(-1, self.num_slots, self.slot_dim)
+                elif self.prior_class.lower() == 'none':
+                    pass
+
             # predictor
             slots = self.predictor(slots)
 
-        slots_list = torch.stack(slots_list, dim=1)   # B, T, num_slots, slot_size
+            if t > 0 and self.prior_class.lower() == 'keep':
+                slots = slots_init
 
-        return slots_list
+        slots_list = torch.stack(slots_list, dim=1)   # B, T, num_slots, slot_size
+        slots_init_list = torch.stack(slots_init_list, dim=1)
+
+        return slots_list, slots_init_list
 
     
 
