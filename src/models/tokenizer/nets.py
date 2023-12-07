@@ -10,8 +10,8 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from omegaconf import ListConfig
-
 from .transformer_utils import *
+
 
 
 @dataclass
@@ -125,12 +125,14 @@ class Encoder(nn.Module):
         h = self.conv_out(h)
         return h
     
+
 # class SpatialBroadcastDecoder(nn.Module):
 #     def __init__(
 #         self, config: EncoderDecoderConfig) -> None:
 #         super().__init__()
 
 #         params = SBDConfig()
+
 
 #         self.conv_bone = []
 #         self.config = config
@@ -541,6 +543,7 @@ class AttnBlock(nn.Module):
         return x + h_
 
 
+
 @dataclass
 class SAConfig:
     num_slots: int
@@ -870,7 +873,6 @@ class SlotAttentionVideo(nn.Module):
 
                 slots = self.norm_slots(slots)
                 q = self.to_q(slots)
-
                 dots = torch.bmm(k[:, t], q.transpose(-1, -2))
                 attn = dots.softmax(dim=-1) + self.eps
 
@@ -1023,3 +1025,4 @@ class MLPDecoder(nn.Module):
         masks_as_image = resize_patches_to_image(masks, size=self.config.resolution, resize_mode="bilinear")
 
         return reconstruction, masks, masks_as_image
+

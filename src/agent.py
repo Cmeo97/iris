@@ -19,7 +19,7 @@ class Agent(nn.Module):
 
     @property
     def device(self):
-        return self.actor_critic.conv1.weight.device
+        return self.actor_critic.lstm.bias_hh.device
 
     def load(self, path_to_checkpoint: Path, device: torch.device, load_tokenizer: bool = True, load_world_model: bool = True, load_actor_critic: bool = True) -> None:
         agent_state_dict = torch.load(path_to_checkpoint, map_location=device)
@@ -30,8 +30,8 @@ class Agent(nn.Module):
         if load_actor_critic:
             self.actor_critic.load_state_dict(extract_state_dict(agent_state_dict, 'actor_critic'))
 
-    def act(self, obs: torch.FloatTensor, should_sample: bool = True, temperature: float = 1.0) -> torch.LongTensor:
+    def act(self, obs: torch.FloatTensor, should_sample: bool = True, temperature: float = 1.0, collecting: bool = False) -> torch.LongTensor:
         input_ac = obs if self.actor_critic.use_original_obs else torch.clamp(self.tokenizer.encode_decode(obs, should_preprocess=True, should_postprocess=True), 0, 1)
-        logits_actions = self.actor_critic(input_ac).logits_actions[:, -1] / temperature
+        logits_actions = self.actor_critic(input_ac, collecting=collecting, tokenizer=self.tokenizer, wm=self.world_model).logits_actions[:, -1] / temperature
         act_token = Categorical(logits=logits_actions).sample() if should_sample else logits_actions.argmax(dim=-1)
         return act_token

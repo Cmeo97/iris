@@ -22,8 +22,11 @@ from envs import SingleProcessEnv, MultiProcessEnv
 from episode import Episode
 from make_reconstructions import make_reconstructions_from_batch, make_reconstructions_with_slots_from_batch, save_image_with_slots
 from models.actor_critic import ActorCritic
+
 from models.world_model import WorldModel, OCWorldModel
 from utils import configure_optimizer, EpisodeDirManager, set_seed, linear_warmup_exp_decay
+from torchvision.utils import save_image
+
 
 
 class Trainer:
@@ -100,11 +103,9 @@ class Trainer:
         env = train_env if self.cfg.training.should else test_env
 
         tokenizer = instantiate(cfg.tokenizer)
-        if self.slot_based:
-            world_model = OCWorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
-        else:
-            world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
-        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions)
+        world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
+        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model)
+
         self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
         print(f'{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model')
@@ -182,11 +183,16 @@ class Trainer:
         cfg_tokenizer = self.cfg.training.tokenizer
         cfg_world_model = self.cfg.training.world_model
         cfg_actor_critic = self.cfg.training.actor_critic
+        
+        if self.cfg.world_model.regularization_post_quant:
+            cfg_world_model.batch_num_samples = 16
+            
 
         w = self.cfg.training.sampling_weights
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=4, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
+            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=self.cfg.common.sequence_length, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
+
         self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
@@ -238,13 +244,17 @@ class Trainer:
         cfg_tokenizer = self.cfg.evaluation.tokenizer
         cfg_world_model = self.cfg.evaluation.world_model
         cfg_actor_critic = self.cfg.evaluation.actor_critic
+        
+        if self.cfg.world_model.regularization_post_quant:
+            cfg_world_model.batch_num_samples = 16
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=4)
+            metrics_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=self.cfg.common.sequence_length)
+
 
         if epoch > cfg_world_model.start_after_epochs:
-            metrics_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer)
-
+            metrics_world_model = self.eval_component(self.agent.world_model, sequence_length=self.cfg.common.sequence_length, tokenizer=self.agent.tokenizer, **cfg_world_model)
+            self.inspect_world_model(epoch)
         if epoch > cfg_actor_critic.start_after_epochs:
             self.inspect_imagination(epoch)
 
@@ -308,6 +318,31 @@ class Trainer:
             to_log.append({f'{mode_str}/{k}': v for k, v in metrics_episode.items()})
 
         return to_log
+    
+    
+    @torch.no_grad()
+    def inspect_world_model(self, epoch: int) -> None:
+        batch = self.train_dataset.sample_batch(batch_num_samples=5, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
+        recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
+
+        def save_image_with_slots(observations, recons, save_dir, epoch, suffix='sample'):
+            b, t, _, _, _ = observations.size()
+
+            for i in range(b):
+                obs = observations[i].cpu() # (t c h w)
+                recon = recons[i].cpu() # (t c h w)
+
+                full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
+                full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+                full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+
+                save_image(full_plot, save_dir / f'epoch_{epoch:03d}_{suffix}_{i:03d}.png', nrow=t)
+                
+        save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
+
+    
+      
+
 
     def _save_checkpoint(self, epoch: int, save_agent_only: bool) -> None:
         torch.save(self.agent.state_dict(), self.ckpt_dir / 'last.pt')

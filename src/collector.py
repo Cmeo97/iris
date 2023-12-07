@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import wandb
-
+import torch.nn as nn
 from agent import Agent
 from dataset import EpisodesDataset
 from envs import SingleProcessEnv, MultiProcessEnv
@@ -37,22 +37,32 @@ class Collector:
         returns = []
         observations, actions, rewards, dones = [], [], [], []
 
-        burnin_obs_rec, mask_padding = None, None
+        burnin_obs_rec, mask_padding, burnin_embeddings = None, None, None
         if set(self.episode_ids) != {None} and burn_in > 0:
             current_episodes = [self.dataset.get_episode(episode_id) for episode_id in self.episode_ids]
             segmented_episodes = [episode.segment(start=len(episode) - burn_in, stop=len(episode), should_pad=True) for episode in current_episodes]
             mask_padding = torch.stack([episode.mask_padding for episode in segmented_episodes], dim=0).to(agent.device)
             burnin_obs = torch.stack([episode.observations for episode in segmented_episodes], dim=0).float().div(255).to(agent.device)
-            burnin_obs_rec = torch.clamp(agent.tokenizer.encode_decode(burnin_obs, should_preprocess=True, should_postprocess=True), 0, 1)
+            if agent.actor_critic.latent_actor:
+                burnin_tokens = agent.tokenizer.encode(burnin_obs).tokens
+                if isinstance(agent.world_model.embedder, nn.ModuleDict): # irisXL
+                    burnin_embeddings= agent.world_model.embedder['z'](burnin_tokens)
+                else: # vanilla iris 
+                    burnin_embeddings= agent.world_model.embedder.embedding_tables[1](burnin_tokens)
+            else:
+                burnin_obs_rec = torch.clamp(agent.tokenizer.encode_decode(burnin_obs, should_preprocess=True, should_postprocess=True), 0, 1)
 
-        agent.actor_critic.reset(n=self.env.num_envs, burnin_observations=burnin_obs_rec, mask_padding=mask_padding)
+        if not agent.actor_critic.latent_actor:
+            agent.actor_critic.reset(n=self.env.num_envs, burnin_observations=burnin_obs_rec, mask_padding=mask_padding)
+        else:
+            agent.actor_critic.reset(n=self.env.num_envs, burnin_observations=burnin_embeddings, mask_padding=mask_padding)
         pbar = tqdm(total=num_steps if num_steps is not None else num_episodes, desc=f'Experience collection ({self.dataset.name})', file=sys.stdout)
 
         while not should_stop(steps, episodes):
 
             observations.append(self.obs)
             obs = rearrange(torch.FloatTensor(self.obs).div(255), 'n h w c -> n c h w').to(agent.device)
-            act = agent.act(obs, should_sample=should_sample, temperature=temperature).cpu().numpy()
+            act = agent.act(obs, should_sample=should_sample, temperature=temperature, collecting=True).cpu().numpy()
 
             if random.random() < epsilon:
                 act = self.heuristic.act(obs).cpu().numpy()

@@ -2,6 +2,7 @@ _target_: models.tokenizer.Tokenizer
 
 vocab_size: 512
 embed_dim: 512
+consistency_loss_reg: False
 encoder:
   _target_: models.tokenizer.Encoder
   config:

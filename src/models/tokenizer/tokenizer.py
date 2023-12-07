@@ -17,7 +17,7 @@ from .lpips import LPIPS
 from .nets import Encoder, Decoder, SlotAttention, SpatialBroadcastDecoder, SAEncoder, SlotAttentionVideo, MLPDecoder
 from .quantizer import *
 from utils import LossWithIntermediateLosses
-
+import torch.nn.functional as F
 
 @dataclass
 class TokenizerEncoderOutput:
@@ -27,7 +27,7 @@ class TokenizerEncoderOutput:
 
 
 class Tokenizer(nn.Module):
-    def __init__(self, vocab_size: int, embed_dim: int, encoder: Encoder, decoder: Decoder, with_lpips: bool = True) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Encoder, decoder: Decoder, with_lpips: bool = True, consistency_loss_reg: bool = False) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.encoder = encoder
@@ -38,6 +38,8 @@ class Tokenizer(nn.Module):
         self.embedding.weight.data.uniform_(-1.0 / vocab_size, 1.0 / vocab_size)
         self.lpips = LPIPS().eval() if with_lpips else None
         self.slot_based = False
+        self.consistency_loss_reg = consistency_loss_reg
+
 
     def __repr__(self) -> str:
         return "tokenizer"
@@ -50,6 +52,7 @@ class Tokenizer(nn.Module):
 
     def compute_loss(self, batch: Batch, **kwargs: Any) -> LossWithIntermediateLosses:
         assert self.lpips is not None
+        b, t, _, _, _ = batch['observations'].shape
         observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
         z, z_quantized, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
 
@@ -58,11 +61,27 @@ class Tokenizer(nn.Module):
         # - VQVAE uses 0.25 by default
         beta = 1.0
         commitment_loss = (z.detach() - z_quantized).pow(2).mean() + beta * (z - z_quantized.detach()).pow(2).mean()
+        
+        if self.consistency_loss_reg:
+            tokens_consistency_loss = 0.1 * self.compute_tokens_consistency_loss(z_quantized.reshape(b,t,*z_quantized.shape[1:]))
+        else:
+            tokens_consistency_loss = 0 * commitment_loss
 
         reconstruction_loss = torch.abs(observations - reconstructions).mean()
         perceptual_loss = torch.mean(self.lpips(observations, reconstructions))
 
-        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss, perceptual_loss=perceptual_loss)
+        return LossWithIntermediateLosses(commitment_loss=commitment_loss, reconstruction_loss=reconstruction_loss, perceptual_loss=perceptual_loss, tokens_consistency_loss=tokens_consistency_loss)
+
+    def compute_tokens_consistency_loss(self, z_q: Any, **kwargs: Any) -> Any:
+        
+        b, l, e, c,_ = z_q.shape
+        z_q_next = z_q[:, 1:].reshape(b*(l-1), e, -1)
+        z_q_current = z_q[:, :-1].reshape(b*(l-1), e, -1).transpose(1,2)
+        mat = torch.bmm(z_q_current, z_q_next)
+        mat = F.softmax(mat, dim=-1)
+        cosine_distance = F.cross_entropy(mat, torch.arange(c**2, device=mat.device).expand(mat.shape[0], -1))/(z_q_current.shape[1])
+        
+        return cosine_distance
 
     def encode(self, x: torch.Tensor, should_preprocess: bool = False) -> TokenizerEncoderOutput:
         if should_preprocess:
@@ -94,6 +113,14 @@ class Tokenizer(nn.Module):
         if should_postprocess:
             rec = self.postprocess_output(rec)
         return rec
+
+
+    @torch.no_grad()
+    def get_post_zq(self, z_q: torch.Tensor) -> torch.Tensor:
+        shape = z_q.shape
+        z_q = z_q.reshape(-1, *shape[-3:])
+        h = self.post_quant_conv(z_q)
+        return h
 
     @torch.no_grad()
     def encode_decode(self, x: torch.Tensor, should_preprocess: bool = False, should_postprocess: bool = False) -> torch.Tensor:

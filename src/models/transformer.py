@@ -28,6 +28,37 @@ class TransformerConfig:
     resid_pdrop: float
     attn_pdrop: float
 
+    model: str
+    dyn_embed_dim: int
+    dyn_num_heads: int
+    dyn_num_layers: int
+    dyn_feedforward_dim: int
+    dyn_head_dim: int
+    dyn_z_dims: list
+    dyn_reward_dims: list
+    dyn_discount_dims: list
+    dyn_input_rewards: bool
+    dyn_input_discounts: bool
+    dyn_act: str
+    dyn_norm: str
+    dyn_dropout: float
+    dyn_lr: float
+    dyn_wd: float
+    dyn_eps: float
+    dyn_grad_clip: int
+    dyn_z_coef: int
+    dyn_reward_coef: int
+    dyn_discount_coef: int
+    wm_batch_size: int
+    wm_sequence_length: int
+    wm_train_steps: int
+    wm_memory_length: int
+    wm_discount_threshold: float
+    embedding_input: bool
+    regularization_post_quant: bool
+    regularization_tokens: bool
+    regularization_embeddings: bool
+
     @property
     def max_tokens(self):
         return self.tokens_per_block * self.max_blocks

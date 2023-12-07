@@ -1,4 +1,8 @@
+config/trainer_mila.yaml
+.nfs*
 # Custom
+*.err
+*.out
 wandb
 .vscode
 outputs
@@ -139,3 +143,5 @@ clevr_robot_env/
 data/
 **.npy
 *.png
+*.sh
+
