@@ -15,14 +15,18 @@ wandb:
   tags: null
   notes: null
 
+# hydra:
+#   run:
+#     dir: outputs/2023-11-15/00-47-03/
+
 initialization:
   path_to_checkpoint: null
   load_tokenizer: False
   load_world_model: False
   load_actor_critic: False
 # initialization:
-#   path_to_checkpoint: checkpoints/epoch.pt
-#   load_tokenizer: False
+#   path_to_checkpoint: checkpoints/last.pt
+#   load_tokenizer: True
 #   load_world_model: False
 #   load_actor_critic: False
 
@@ -32,8 +36,10 @@ common:
   do_checkpoint: True
   seed: 0
   sequence_length: ${world_model.max_blocks}
-  resume: False # set by resume.sh script only.
+  resume: False
+  # resume: True # set by resume.sh script only.
   slot_based: True
+  use_pretrained: False
 
 collection:
   train:
@@ -62,7 +68,7 @@ training:
   sampling_weights: [0.125, 0.125, 0.25, 0.5]
   tokenizer:
     learning_rate: 0.0005
-    batch_num_samples: 64
+    batch_num_samples: 16
     grad_acc_steps: 1
     max_grad_norm: 1.0
     start_after_epochs: 25

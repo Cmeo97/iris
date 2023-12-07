@@ -29,11 +29,12 @@ decoder:
   _target_: models.tokenizer.MLPDecoder
   config: ${..encoder.config}
 slot_attn:
-  _target_: models.tokenizer.SlotAttention
+  _target_: models.tokenizer.SlotAttentionVideo
   config:
     _target_: models.tokenizer.SAConfig
-    num_slots: 11 # num_tokens = num_slots * tokens_per_slot
+    num_slots: 7 # num_tokens = num_slots * tokens_per_slot
     tokens_per_slot: 1
     iters: 3
     channels_enc: 128
     token_dim: 128 # need to match embed_dim if no pre_process_conv
+    prior_class: gru
