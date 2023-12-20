@@ -1,1 +1,3 @@
-use_original_obs: True
+use_original_obs: False
+latent_actor: False
+linear_actor: False

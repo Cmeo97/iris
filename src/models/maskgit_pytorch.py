@@ -149,34 +149,3 @@ class AddBias(nn.Module):
 
 
 
-#class LayerNorm(nn.Module):
-#    def __init__(self, epsilon=1e-6, dtype=None, use_bias=True, use_scale=True):
-#        super(LayerNorm, self).__init__()
-#        self.epsilon = epsilon
-#        self.dtype = dtype
-#        self.use_bias = use_bias
-#        self.use_scale = use_scale
-#
-#    def forward(self, x):
-#        features = x.shape[-1]
-#        mean = torch.mean(x, dim=-1, keepdim=True)
-#        var = torch.var(x, dim=-1, keepdim=True)
-#
-#        y = x - mean
-#        mul = torch.rsqrt(var + self.epsilon)
-#        
-#        if self.use_scale:
-#            if not hasattr(self, 'scale'):
-#                self.scale = nn.Parameter(torch.ones(features, dtype=x.dtype))
-#            mul = mul * self.scale
-#        y = y * mul
-#
-#        if self.use_bias:
-#            if not hasattr(self, 'bias'):
-#                self.bias = nn.Parameter(torch.zeros(features, dtype=x.dtype))
-#            y = y + self.bias
-#
-#        if self.dtype:
-#            y = y.type(self.dtype)
-#
-#        return y

@@ -170,7 +170,7 @@ class Trainer:
                 # self.agent.tokenizer.quantizer.plot_slot_dist(epoch, self.reconstructions_dir) # for debugging
                 # self.agent.tokenizer.quantizer.plot_codebook(epoch, self.reconstructions_dir) # for debugging
                 self.agent.tokenizer.set_tau()
-                self.agent.world_model.plot_count(epoch, self.reconstructions_dir) # for debugging
+                #self.agent.world_model.plot_count(epoch, self.reconstructions_dir) # for debugging
 
         self.finish()
 
@@ -196,7 +196,7 @@ class Trainer:
         self.agent.tokenizer.eval()
 
         if epoch > cfg_world_model.start_after_epochs:
-            metrics_world_model = self.train_component(self.agent.world_model, self.optimizer_world_model, self.scheduler_world_model, sequence_length=2, sample_from_start=True, sampling_weights=w, tokenizer=self.agent.tokenizer, **cfg_world_model)
+            metrics_world_model = self.train_component(self.agent.world_model, self.optimizer_world_model, self.scheduler_world_model, sequence_length=self.cfg.common.sequence_length, sample_from_start=True, sampling_weights=w, tokenizer=self.agent.tokenizer, **cfg_world_model)
         self.agent.world_model.eval()
 
         if epoch > cfg_actor_critic.start_after_epochs:
@@ -293,12 +293,11 @@ class Trainer:
         metrics = {f'{str(component)}/eval/total_loss': loss_total_epoch / steps, **intermediate_losses}
         return metrics
 
-    @torch.no_grad()
-    def inspect_world_model(self, epoch: int) -> None:
-        batch = self.train_dataset.sample_batch(batch_num_samples=1, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
-        recons, colors, masks = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, burn_in=5, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
-
-        save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, colors, masks, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
+    #@torch.no_grad()
+    #def inspect_world_model(self, epoch: int) -> None:
+    #    batch = self.train_dataset.sample_batch(batch_num_samples=1, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
+    #    recons, colors, masks = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, burn_in=5, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
+    #    save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, colors, masks, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
 
     @torch.no_grad()
     def inspect_imagination(self, epoch: int) -> None:
@@ -324,21 +323,42 @@ class Trainer:
     def inspect_world_model(self, epoch: int) -> None:
         batch = self.train_dataset.sample_batch(batch_num_samples=5, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
         recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
-
-        def save_image_with_slots(observations, recons, save_dir, epoch, suffix='sample'):
-            b, t, _, _, _ = observations.size()
-
+        if self.agent.tokenizer.slot_based:
+            recons, masks, colors = recons
+        def save_sequence_image(observations, recons, save_dir, epoch, suffix='sample'):
+            b, t, _, _, dim = observations.size()
+            
             for i in range(b):
                 obs = observations[i].cpu() # (t c h w)
                 recon = recons[i].cpu() # (t c h w)
 
                 full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
                 full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
-                full_plot = full_plot.view(-1, 3, 64, 64)  # (H*W, 3, D, D)
+                full_plot = full_plot.view(-1, 3, dim, dim)  # (H*W, 3, D, D)
 
                 save_image(full_plot, save_dir / f'epoch_{epoch:03d}_{suffix}_{i:03d}.png', nrow=t)
-                
-        save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
+
+        def save_image_with_slots(observations, recons, colors, masks, save_dir, epoch, suffix='sample'):
+            b, t, _, h, w = observations.size()
+
+            for i in range(b):
+                obs = observations[i].cpu() # (t c h w)
+                recon = recons[i].cpu() # (t c h w)
+
+                full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
+                color = colors[i].cpu()
+                mask = masks[i].cpu()
+                subimage = color * mask
+                full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
+                full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)
+                full_plot = full_plot.view(-1, 3, h, w)  # (H*W, 3, D, D)
+
+                save_image(full_plot, save_dir / f'epoch_{epoch:03d}_{suffix}_{i:03d}.png', nrow=t)
+
+        if self.agent.tokenizer.slot_based:       
+            save_image_with_slots(batch['observations'][:, 1:1+recons.shape[1]], recons, colors, masks, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
+        else:
+            save_sequence_image(batch['observations'][:, 1:1+recons.shape[1]], recons, save_dir=self.reconstructions_dir, epoch=epoch, suffix='rollout')
 
     
       

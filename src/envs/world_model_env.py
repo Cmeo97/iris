@@ -19,13 +19,12 @@ class WorldModelEnv:
         self.world_model = world_model.to(self.device).eval()
         self.tokenizer = tokenizer.to(self.device).eval()
         self.model = model
-        self.keys_values_wm, self.obs_tokens, self._num_observations_tokens = None, None, None
+        self.keys_values_wm, self.obs_tokens, self._num_observations_tokens, self.embedded_tokens = None, None, None, None
         self.parallel_imagination = True
         self.env = env
         self.first_obs_token = None
         if actor is not None:
             self.actor = actor.to(self.device).eval()
-
         self.slot_based = tokenizer.slot_based
 
     @property
@@ -41,15 +40,23 @@ class WorldModelEnv:
     @torch.no_grad()
     def reset_from_initial_observations(self, observations: torch.FloatTensor) -> torch.FloatTensor:
 
-        self.obs_tokens = self.tokenizer.encode(observations, should_preprocess=True).tokens    # (B, C, H, W) -> (B, K)
-        _, num_observations_tokens = self.obs_tokens.shape
+        encodings = self.tokenizer.encode(observations, should_preprocess=True)   # (B, C, H, W) -> (B, K)
+        self.obs_tokens = encodings.z if self.slot_based else encodings.tokens 
+        init_variables = self.obs_tokens if self.model != 'irisXL-continuos' else rearrange(encodings.z_quantized, 't e o p -> t (o p) e')
+        if self.model == 'OC-irisXL':
+            init_variables = self.obs_tokens
+            num_observations_tokens = self.obs_tokens.shape[1] 
+        else:
+            _, num_observations_tokens = self.obs_tokens.shape
         if self.num_observations_tokens is None:
             self._num_observations_tokens = num_observations_tokens
         if self.model == 'iris':
             _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
         #self.obs_logits = self.tokenizer.encode_logits(outputs.z) # need to use logits instead of tokens when using dVAE, from nakano_dev
-        return self.decode_obs_tokens(), self.obs_tokens
-
+        output = self.decode_obs_tokens(observations) if self.slot_based else self.decode_obs_tokens()
+        return output, init_variables
+    
+    
 
     @torch.no_grad()
     def refresh_keys_values_with_initial_obs_tokens(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
@@ -75,7 +82,7 @@ class WorldModelEnv:
         all_rewards = []
         all_ends = []
         output_sequence, tokens_sequences, lengths = deque(), deque(), deque()
-        
+        self.embedded_tokens = None
         obs, obs_tokens = self.reset_from_initial_observations(initial_observations[:, -1])
         stop_mask = torch.zeros((obs_tokens.shape[0], 1), device=obs_tokens.device) # Stop Mask initialization
         num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
@@ -135,40 +142,41 @@ class WorldModelEnv:
             
 
     @torch.no_grad()
-    def step(self, action: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None, should_return_slots: Optional[bool] = False) -> None:
-        #assert self.keys_values_wm is not None and self.num_observations_tokens is not None
+    def step(self, tokens: Union[int, np.ndarray, torch.LongTensor], mems: Optional[List] = None , should_predict_next_obs: bool = True, stop_mask: Optional[bool] = None, should_return_slots: Optional[bool] = False, obs: Optional[torch.LongTensor] = None) -> None:
+       
         num_passes = 1 + self.num_observations_tokens if should_predict_next_obs else 1
         output_sequence, obs_tokens= [], []
-        token = action.clone().detach() if isinstance(action, torch.Tensor) else torch.tensor(action, dtype=torch.long)
-        token = token.reshape(-1, 1).to(self.device)  # (B, 1)
-
+        if isinstance(tokens, dict):
+            tokens['a'] = tokens['a'].clone().detach().reshape(-1, 1)
+        tokens = tokens.clone().detach().reshape(-1, 1).to(self.device) if isinstance(tokens, torch.Tensor) else {name: mod(tokens[name]).unsqueeze(1).to(self.device) for name, mod in self.world_model.embedder.items()} if isinstance(tokens, dict) else torch.tensor(tokens, dtype=torch.long).reshape(-1, 1).to(self.device)
+        
         if self.model == 'iris':
             if self.keys_values_wm.size + num_passes > self.world_model.config.max_tokens:
                 _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
 
             for k in range(num_passes):  # assumption that there is only one action token.
 
-                outputs_wm = self.world_model(token, past_keys_values=self.keys_values_wm, mems=mems, stop_mask=stop_mask, tgt_length=1)
+                outputs_wm = self.world_model(tokens, past_keys_values=self.keys_values_wm, mems=mems, stop_mask=stop_mask, tgt_length=1)
                 output_sequence.append(outputs_wm.output_sequence)
-                if mems is not None:
-                    mems = outputs_wm.mems
-
+                
                 if k == 0:
                     reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
                     done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
 
                 if k < self.num_observations_tokens:
-                    token = Categorical(logits=outputs_wm.logits_observations).sample()
-                    obs_tokens.append(token)
+                    tokens = Categorical(logits=outputs_wm.logits_observations).sample()
+                    obs_tokens.append(tokens)
+
+            self.obs_tokens = torch.cat(obs_tokens, dim=1)  
+            obs = self.decode_obs_tokens() if should_predict_next_obs else None
+            
+            return obs, reward, done, mems, self.obs_tokens
 
         elif self.model == 'irisXL-discrete':
-            
-            #h = self.refresh_embeddings_with_initial_obs_tokens(obs_tokens=self.obs_tokens, stop_mask=stop_mask)
-            h = self.world_model.embedder['a'](token)
-            for k in range(num_passes):  # assumption that there is only one action token.
+            h = self.world_model.embedder['a'](tokens)
+            for k in range(num_passes):  # assumption that there is only one action tokens.
 
-                outputs_wm = self.world_model({'z': token, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input, generation=True) 
-                #output_sequence.append(outputs_wm.output_sequence)
+                outputs_wm = self.world_model({'z': tokens, 'h': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=self.world_model.embedding_input, generation=True) 
                 if mems is not None:
                     mems = outputs_wm.mems
 
@@ -177,15 +185,54 @@ class WorldModelEnv:
                     done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
 
                 if k < self.num_observations_tokens:
-                    token = Categorical(logits=outputs_wm.logits_observations).sample()
+                    tokens = Categorical(logits=outputs_wm.logits_observations).sample()
                     h = outputs_wm.output_sequence
-                    obs_tokens.append(token)
+                    obs_tokens.append(tokens)
 
-        #output_sequence = torch.cat(output_sequence, dim=1)   # (B, 1 + K, E)
-        self.obs_tokens = torch.cat(obs_tokens, dim=1)        # (B, K)
+            self.obs_tokens = torch.cat(obs_tokens, dim=1)     # (B, 1 + K, E)
+            obs = self.decode_obs_tokens() if should_predict_next_obs else  None
+            return obs, reward, done, mems, self.obs_tokens
 
-        obs, color, mask = self.decode_obs_tokens() if should_predict_next_obs else  None, None, None
-        return obs, reward, done, mems, color, mask, self.obs_tokens if should_return_slots else obs, reward, done, mems, self.obs_tokens
+        elif self.model == 'irisXL-continuos':
+            
+            h = self.world_model.embedder['a'](tokens)
+            for k in range(num_passes):  # assumption that there is only one action token.
+                outputs_wm = self.world_model({'z': h}, mems=mems, stop_mask=stop_mask, tgt_length=1, generation=True) 
+                
+                mems = outputs_wm.mems
+                if k == 0:
+                    reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+                    done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+                if k < self.num_observations_tokens:
+                    h = outputs_wm.embeddings
+                    output_sequence.append(outputs_wm.embeddings)
+
+            self.embedded_tokens = self.obs_tokens = output_sequence # (B, 1 + K, E)
+      
+            obs = self.decode_obs_tokens() if should_predict_next_obs else None
+            
+            return obs, reward, done, mems, self.embedded_tokens
+            
+        elif self.model == 'OC-irisXL':
+            num_passes = self.num_observations_tokens if should_predict_next_obs else 1
+            
+            outputs_wm = self.world_model(tokens, mems=mems, stop_mask=stop_mask, tgt_length=1, embedding_input=True, generation=True) 
+            
+            mems = outputs_wm.mems
+            reward = Categorical(logits=outputs_wm.logits_rewards).sample().float().cpu().numpy().reshape(-1) - 1   # (B,)
+            done = Categorical(logits=outputs_wm.logits_ends).sample().cpu().numpy().astype(bool).reshape(-1)       # (B,)
+            output_sequence = outputs_wm.embeddings
+
+            self.embedded_tokens = self.obs_tokens = output_sequence # (B, 1 + K, E)
+      
+            output = self.decode_obs_tokens(obs) if obs is not None else self.decode_obs_tokens() if should_predict_next_obs else None
+            if should_return_slots:
+                obs, color, mask = output 
+                return obs, reward, done, mems, color, mask, self.embedded_tokens 
+            else:
+                obs, _, _ = output
+                return obs, reward, done, mems, self.embedded_tokens
+      
       
 
     @torch.no_grad()
@@ -195,18 +242,15 @@ class WorldModelEnv:
         return [Image.fromarray(frame) for frame in frames]
 
     @torch.no_grad()
-    def decode_obs_tokens(self) -> List[Image.Image]:
-        color, mask = None, None
+    def decode_obs_tokens(self, observations=None) -> List[Image.Image]:
         if self.slot_based:
-            # embedded_tokens = self.tokenizer.decode_logits(self.obs_logits)     # (B, K, E) if using dVAE
-            embedded_tokens = self.tokenizer.quantizer.get_embedding(self.obs_tokens)     # (B, K, E) if using VQVAE-based
-            z = rearrange(embedded_tokens, 'b (k t) e -> b e k t', k=self.tokenizer.num_slots, t=self.tokenizer.tokens_per_slot)
-            rec, color, mask = self.tokenizer.decode_slots(z, should_postprocess=True)         # (B, C, H, W)
+            rec, color, mask = self.tokenizer.decode_slots(self.obs_tokens, observations)         # (B, C, H, W)
+            return torch.clamp(rec, 0, 1), color, mask
         else:
-            embedded_tokens = self.tokenizer.embedding(self.obs_tokens)     # (B, K, E)
+            embedded_tokens = self.tokenizer.embedding(self.obs_tokens) if self.embedded_tokens == None else self.embedded_tokens    # (B, K, E)
             z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
             rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
-        return torch.clamp(rec, 0, 1), color, mask
+            return torch.clamp(rec, 0, 1)
 
     @torch.no_grad()
     def render(self):

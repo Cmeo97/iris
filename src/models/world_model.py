@@ -37,9 +37,10 @@ class WorldModelOutputEmbs:
 @dataclass
 class ContinuosWorldModelOutput:
     output_sequence: torch.FloatTensor
-    encodings: torch.FloatTensor
+    embeddings: torch.FloatTensor
     logits_rewards: torch.FloatTensor
     logits_ends: torch.FloatTensor
+    mems: torch.FloatTensor
 
 class WorldModel(nn.Module):
     def __init__(self, obs_vocab_size: int, act_vocab_size: int, config: TransformerConfig) -> None:
@@ -47,30 +48,40 @@ class WorldModel(nn.Module):
         self.obs_vocab_size, self.act_vocab_size = obs_vocab_size, act_vocab_size
         self.config = config
         all_but_last_obs_tokens_pattern = torch.ones(config.tokens_per_block)
-        all_but_last_obs_tokens_pattern[-2] = 0
+        if config.model == 'OC-irisXL':
+            all_but_last_obs_tokens_pattern[-1] = 0
+        else:
+            all_but_last_obs_tokens_pattern[-2] = 0
         act_tokens_pattern = torch.zeros(self.config.tokens_per_block)
         act_tokens_pattern[-1] = 1
         obs_tokens_pattern = 1 - act_tokens_pattern
         self.regularization_post_quant = config.regularization_post_quant
         self.embedding_input = config.embedding_input
         self.regularization_tokens = config.regularization_tokens
+        self.slot_regularization = config.slot_regularization
+            
         
-        
-        
+        self.regularization_k_pred = config.regularization_k_pred
         self.regularization_embeddings = config.regularization_embeddings
-        self.regularization = (self.regularization_post_quant or self.regularization_tokens or self.regularization_embeddings)
+        self.regularization = (self.regularization_post_quant or self.regularization_tokens or self.regularization_embeddings or self.regularization_k_pred or self.slot_regularization)
         if self.regularization_tokens:
             self.loss_iter = []
+            
         if self.regularization_embeddings:
             self.loss_iter_embeds = []
 
+        
+        embed_dim = config.continuos_embed_dim if (self.config.model == 'irisXL-continuos' or self.config.model == 'OC-irisXL') else config.embed_dim
+        self.slot_based = True if self.config.model == 'OC-irisXL' else False
+       
+            
         if self.config.model== 'iris':
             self.transformer = Transformer(config)
-            self.pos_emb = nn.Embedding(config.max_tokens, config.embed_dim)
+            self.pos_emb = nn.Embedding(config.max_tokens, embed_dim)
             self.embedder = Embedder(
             max_blocks=config.max_blocks,
             block_masks=[act_tokens_pattern, obs_tokens_pattern],
-            embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, config.embed_dim), nn.Embedding(obs_vocab_size, config.embed_dim)])
+            embedding_tables=nn.ModuleList([nn.Embedding(act_vocab_size, embed_dim), nn.Embedding(obs_vocab_size, embed_dim)])
             )
             
 
@@ -92,44 +103,43 @@ class WorldModel(nn.Module):
                 }
 
                 self.embedder = nn.ModuleDict({
-                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
-                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
                 for name, embed in embeds.items()
                 })
 
                 self.transformer = TransformerXL(
-                modality_order, num_current, embed_dim=config.dyn_embed_dim,
+                modality_order, num_current, embed_dim=embed_dim,
                 activation=config.dyn_act, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
                 memory_length=memory_length, max_length=max_length)
 
 
-            elif self.config.model == 'irisXL-continuos': #to reproduce iris with transformer XL
+            elif self.config.model == 'irisXL-continuos' or self.config.model == 'OC-irisXL': #to reproduce iris with transformer XL
                 embeds = {
-                    'z': {'in_dim': config.embed_dim, 'categorical': False},
+                    'z': {'in_dim': config.continuos_embed_dim, 'categorical': False},
                     'a': {'in_dim': act_vocab_size, 'categorical': True}
                 }
 
+                
                 self.embedder = nn.ModuleDict({
-                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
-                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
                 for name, embed in embeds.items()
                 })
 
 
                 self.transformer = TransformerXL(
-                modality_order, num_current, embed_dim=config.dyn_embed_dim,
+                modality_order, num_current, embed_dim=embed_dim,
                 activation=config.dyn_act, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
-                memory_length=memory_length, max_length=max_length)
-
-
+                memory_length=memory_length, max_length=max_length, slot_based=(self.config.model == 'OC-irisXL'))
 
             elif self.config.model == 'Asymmetric': #for Asymmetric Transformer XL approach 
                 continuos_embeds = {
-                    'z': {'in_dim': config.embed_dim, 'categorical': False},
+                    'z': {'in_dim': embed_dim, 'categorical': False},
                     'a': {'in_dim': act_vocab_size, 'categorical': True}
                 } 
                 discrete_embeds = {
@@ -138,26 +148,26 @@ class WorldModel(nn.Module):
                 }
 
                 self.continuos_embedder = nn.ModuleDict({
-                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
-                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
                 for name, embed in continuos_embeds.items()
                 })
 
                 self.discrete_embedder = nn.ModuleDict({
-                name: nn.Embedding(embed['in_dim'], config.dyn_embed_dim) if embed.get('categorical', False) else
-                MLP(embed['in_dim'], [], config.dyn_embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
+                name: nn.Embedding(embed['in_dim'], embed_dim) if embed.get('categorical', False) else
+                MLP(embed['in_dim'], [], embed_dim, config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout, post_activation=True)
                 for name, embed in discrete_embeds.items()
                 })
 
                 self.continuos_transformer = TransformerXL(
-                modality_order, num_current, continuos_embeds, embed_dim=config.dyn_embed_dim,
+                modality_order, num_current, continuos_embeds, embed_dim=embed_dim,
                 activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
                 memory_length=memory_length, max_length=max_length)
 
                 self.discrete_transformer = TransformerXL(
-                modality_order, num_current, discrete_embeds, embed_dim=config.dyn_embed_dim,
+                modality_order, num_current, discrete_embeds, embed_dim=embed_dim,
                 activation=config.dyn_act, norm=config.dyn_norm, dropout_p=config.dyn_dropout,
                 feedforward_dim=config.dyn_feedforward_dim, head_dim=config.dyn_head_dim,
                 num_heads=config.dyn_num_heads, num_layers=config.dyn_num_layers,
@@ -174,9 +184,9 @@ class WorldModel(nn.Module):
             max_blocks=config.max_blocks,
             block_mask=all_but_last_obs_tokens_pattern,
             head_module=nn.Sequential(
-                nn.Linear(config.embed_dim, config.embed_dim),
+                nn.Linear(embed_dim, embed_dim),
                 nn.ReLU(),
-                nn.Linear(config.embed_dim, obs_vocab_size)
+                nn.Linear(embed_dim, obs_vocab_size)
             )
         )
         
@@ -184,9 +194,9 @@ class WorldModel(nn.Module):
             max_blocks=config.max_blocks,
             block_mask=all_but_last_obs_tokens_pattern,
             head_module=nn.Sequential(
-                nn.Linear(config.embed_dim, config.embed_dim),
+                nn.Linear(embed_dim, embed_dim),
                 nn.ReLU(),
-                nn.Linear(config.embed_dim, config.embed_dim)
+                nn.Linear(embed_dim, config.continuos_embed_dim)
             )
         )
 
@@ -194,9 +204,9 @@ class WorldModel(nn.Module):
             max_blocks=config.max_blocks,
             block_mask=act_tokens_pattern,
             head_module=nn.Sequential(
-                nn.Linear(config.embed_dim, config.embed_dim),
+                nn.Linear(embed_dim, embed_dim),
                 nn.ReLU(),
-                nn.Linear(config.embed_dim, 3)
+                nn.Linear(embed_dim, 3)
             )
         )
 
@@ -204,9 +214,9 @@ class WorldModel(nn.Module):
             max_blocks=config.max_blocks,
             block_mask=act_tokens_pattern,
             head_module=nn.Sequential(
-                nn.Linear(config.embed_dim, config.embed_dim),
+                nn.Linear(embed_dim, embed_dim),
                 nn.ReLU(),
-                nn.Linear(config.embed_dim, 2)
+                nn.Linear(embed_dim, 2)
             )
         )
 
@@ -244,16 +254,13 @@ class WorldModel(nn.Module):
             logits_ends = self.head_ends(x, num_steps=num_steps, prev_steps=prev_steps)
 
             return WorldModelOutput(x, logits_observations, logits_rewards, logits_ends, None)
-
-        elif self.config.model == 'irisXL-discrete' or self.config.model == 'irisXL-continuos':
+        
+        elif self.config.model == 'OC-irisXL':
 
             if generation:
-                if embedding_input:
-                    inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
-                else:
-                    inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
-                num_steps = inputs['z'].size(1) if inputs['z'].dim() == 3 else inputs['z'].size(1)*inputs['z'].size(2)
-                prev_steps = 16 + mems[0].shape[0] # num default # of obs tokens
+                #inputs = {'z': self.embedder['z'](inputs['z'])} if (mems is None or mems[0].shape[0]%7 == 0) else {'z': inputs['z']}  # fix embedder, and inputs format for actor critic part
+                num_steps = inputs['z'].size(1)*(inputs['z'].size(2)+inputs['a'].size(2))
+                prev_steps =  0 if mems is None else mems[0].shape[0] # num default # of obs tokens
             else: 
                 if self.regularization and mems is not None:
                     actions = inputs['a']
@@ -268,16 +275,62 @@ class WorldModel(nn.Module):
 
             logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
             logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
-            if self.config.model == 'irisXL-discrete':
-                logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
+            embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
+            return ContinuosWorldModelOutput(h, embeddings, logits_rewards, logits_ends, mems)
+
+        elif self.config.model == 'irisXL-continuos':
+
+            if generation:
+                inputs = {'z': self.embedder['z'](inputs['z'])} if (mems is None or mems[0].shape[0]%self.config.tokens_per_block-1 == 0) else {'z': inputs['z']}  # fix embedder, and inputs format for actor critic part
+                num_steps = inputs['z'].size(1) if inputs['z'].dim() == 3 else inputs['z'].size(1)*inputs['z'].size(2)
+                prev_steps =  self.config.tokens_per_block-1 if mems is None else self.config.tokens_per_block-1 + mems[0].shape[0] # num default # of obs tokens
+            else: 
+                if self.regularization and mems is not None:
+                    actions = inputs['a']
+                    inputs = inputs['z']
+                    num_steps, prev_steps = inputs.shape[1], mems[0].shape[0]
+                    inputs[:, self.shift_action_token.compute_slice(num_steps, prev_steps)] = actions
+                    inputs = {'z': inputs}
+                else:
+                    num_steps, prev_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1), 0  # (B, L, T) -> L*(T+1), 1 for action token 
+            
+            h, mems = self.transformer(inputs, tgt_length, stop_mask, mems, generation)
+
+            logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
+            logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
+            embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
+            return ContinuosWorldModelOutput(h, embeddings, logits_rewards, logits_ends, mems)
+
+        elif self.config.model == 'irisXL-discrete':
+
+            if generation:
                 if embedding_input:
-                    embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
-                    return WorldModelOutputEmbs(h, embeddings, logits_observations, logits_rewards, logits_ends, mems)
-                else: 
-                    return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends, mems)
-            else:
-                encodings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
-                return ContinuosWorldModelOutput(h, encodings, logits_rewards, logits_ends)
+                    inputs = {'z': inputs['h']} # using directly transformer output from previous timestep
+                else:
+                    inputs = {'z': self.embedder['z'](inputs['z'])}  # fix embedder, and inputs format for actor critic part
+                num_steps = inputs['z'].size(1) if inputs['z'].dim() == 3 else inputs['z'].size(1)*inputs['z'].size(2)
+                prev_steps = 16 + mems[0].shape[0] # num default # of obs tokens
+            else: 
+                if self.regularization and mems is not None:
+                    actions = inputs['a']
+                    inputs = inputs['z'] 
+                    num_steps, prev_steps = inputs.shape[1], mems[0].shape[0]
+                    inputs[:, self.shift_action_token.compute_slice(num_steps, prev_steps)] = actions
+                    inputs = {'z': inputs}
+                else:
+                    num_steps, prev_steps = inputs['z'].size(1)*(inputs['z'].size(2)+1), 0  # (B, L, T) -> L*(T+1), 1 for action token 
+            
+            h, mems = self.transformer(inputs, tgt_length, stop_mask, mems, generation)
+
+            logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
+            logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
+            logits_observations = self.head_observations(h, num_steps=num_steps, prev_steps=prev_steps)
+            if embedding_input:
+                embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
+                return WorldModelOutputEmbs(h, embeddings, logits_observations, logits_rewards, logits_ends, mems)
+            else: 
+                return WorldModelOutput(h, logits_observations, logits_rewards, logits_ends, mems)
+
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
         
@@ -302,18 +355,92 @@ class WorldModel(nn.Module):
 
         elif self.config.model == 'irisXL-continuos':
             
-            obs_encodings = tokenizer.encode(batch['observations'], should_preprocess=True).z_quantized  # (B, L, K, E)
-            inputs = {'z': obs_encodings, 'a': batch['actions']}
-            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_encodings.shape[1])
+            with torch.no_grad():
+                obs_embeddings = tokenizer.encode(batch['observations'], should_preprocess=True).z_quantized  # (B, L, E, K^1/2, K^1/2)
+            
+            obs_embeddings = rearrange(obs_embeddings, 'b t e o p -> b t (o p) e')
 
-            labels_embeddings, labels_rewards, labels_ends = self.compute_labels_continuos_world_model(obs_encodings, batch['rewards'], batch['ends'], batch['mask_padding'])
+            inputs_ = {'z': obs_embeddings, 'a': batch['actions']}
+            inputs = {name: mod(inputs_[name]) for name, mod in self.embedder.items()}
+            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_embeddings.shape[1])
 
-            embeddings = rearrange(outputs.embeddings[:, :-1], 'b t o e -> (b t) o e')
-            loss_embedding = F.mse_loss(embeddings, labels_embeddings)
+            end_positions, labels_rewards, labels_ends = self.compute_labels_continuos_world_model(obs_embeddings, batch['rewards'], batch['ends'], batch['mask_padding'])
+
+            loss_embeddings = F.mse_loss(outputs.embeddings[:, :-1], rearrange(obs_embeddings, 'b t e o  -> b (t e) o')[:, 1:], reduction='none')
+            loss_embeddings[end_positions] *= 0
+           
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
             loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
             
-            loss = LossWithIntermediateLosses(loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embedding)
+            loss = LossWithIntermediateLosses(loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embeddings.mean())
+            
+        elif self.config.model == 'OC-irisXL' and not self.slot_regularization:
+            
+            with torch.no_grad():
+                obs_embeddings = tokenizer.encode(batch['observations'], should_preprocess=True).z  # (B, L, Num_slots, slot_dim)
+
+            inputs_ = {'z': obs_embeddings, 'a': batch['actions']}
+            inputs = {name: mod(inputs_[name]) for name, mod in self.embedder.items()}
+            outputs = self(inputs, stop_mask=batch['ends'], tgt_length=obs_embeddings.shape[1])
+
+            end_positions, labels_rewards, labels_ends = self.compute_labels_OC_world_model(obs_embeddings, batch['rewards'], batch['ends'], batch['mask_padding'])
+
+            loss_embeddings = F.mse_loss(outputs.embeddings[:, :-self.config.tokens_per_block], rearrange(obs_embeddings, 'b t e o  -> b (t e) o')[:, self.config.tokens_per_block:], reduction='none')
+            loss_embeddings[end_positions] *= 0
+           
+            loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
+            loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+            
+            loss = LossWithIntermediateLosses(loss_rewards=loss_rewards, loss_ends=loss_ends, loss_embeddings=loss_embeddings.mean())
+            
+        elif self.config.model == 'OC-irisXL' and self.slot_regularization:
+            
+            
+            with torch.no_grad():
+                obs_embeddings = tokenizer.encode(batch['observations'], should_preprocess=True).z  # (B, L, E, K^1/2, K^1/2)
+                sam_features = tokenizer.decode(obs_embeddings[:, 1:])
+            
+            obs_embeddings = rearrange(obs_embeddings, 'b t e o p -> b t (o p) e')
+
+            inputs_ = {'z': obs_embeddings, 'a': batch['actions']}
+            inputs = {name: mod(inputs_[name]) for name, mod in self.embedder.items()}
+            mems = None
+            k = 6
+            for i in range(self.config.tokens_per_block):  
+                outputs = self(inputs, mems=mems, stop_mask=batch['ends'], tgt_length=obs_tokens.shape[1])
+
+                if i == 0:
+                    end_positions, labels_rewards, labels_ends = self.compute_labels_continuos_world_model(obs_embeddings, batch['rewards'], batch['ends'], batch['mask_padding'])
+                    loss_embeddings = F.mse_loss(outputs.embeddings[:, :-1], rearrange(obs_embeddings, 'b t e o  -> b (t e) o')[:, 1:], reduction='none')
+                    loss_embeddings[end_positions] *= 0
+                    loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
+                    loss_ends = F.cross_entropy(rearrange(outputs.logits_ends, 'b t e -> (b t) e'), labels_ends)
+                    labels_embeddings = rearrange(inputs['z'], 'b s t o -> b (s t) o')[:, 1:]
+            
+                next_input = outputs.output_sequence
+                next_input[:, self.head_observations.compute_slice(num_steps=next_input.shape[1], prev_steps=i)] = self.embedder['z'](outputs.embeddings)
+                inputs = {'z': next_input , 'a': actions}
+                mems = outputs.mems
+            
+                if i%k == 0 and self.regularization_k_pred:
+                    labels_embeddings_reg = rearrange(labels_embeddings[:, i:], 'b t o -> (b t) o')
+                    embeds = outputs.embeddings[:, :-1] if i < 16 else outputs.embeddings[:, :-2]
+                    embeds_observations_reg = rearrange(embeds, 'b t o -> (b t) o') 
+                    loss_pred_k = F.mse_loss(embeds_observations_reg, labels_embeddings_reg)
+                    
+                    
+            if self.regularization_post_quant:
+                pred_slots = outputs.embeddings[:, :-1]
+                decoder = tokenizer.decode.eval()
+                decoded_features = decoder(pred_slots)
+                #post_quant_z = tokenizer.decode(rearrange(tokenizer.embedding(tokens), 'b (l t) e -> (b l) e t', l = 19).reshape(*post_quant_z_gt.shape).contiguous())
+                loss_post_quant = F.mse_loss(sam_features, decoded_features)
+                loss.loss_total += loss_post_quant 
+                loss.intermediate_losses['loss_reg_post_quant'] = loss_post_quant 
+
+            
+            
+         
 
         elif self.config.model == 'irisXL-discrete' and not self.regularization:
             with torch.no_grad():
@@ -424,13 +551,23 @@ class WorldModel(nn.Module):
         labels_ends = ends.masked_fill(mask_fill, -100)
         return labels_observations, labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
-    def compute_labels_continuos_world_model(self, encodings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def compute_labels_continuos_world_model(self, embeddings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done
         mask_fill = torch.logical_not(mask_padding)
-        labels_observations = rearrange(encodings.masked_fill(mask_fill.unsqueeze(-1).expand_as(encodings), -100), 'b t k e -> b (t k e)')[:, 1:]
         labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
         labels_ends = ends.masked_fill(mask_fill, -100)
-        return labels_observations.reshape(-1), labels_rewards.reshape(-1), labels_ends.reshape(-1)
+        end_positions = mask_fill.repeat_interleave(embeddings.shape[2], dim=1) if embeddings.dim() == 4 else mask_fill.repeat_interleave(embeddings.shape[1], dim=1) 
+        end_positions = end_positions.unsqueeze(2).repeat(1,1,embeddings.shape[-1])[:,1:]
+        return end_positions, labels_rewards.reshape(-1), labels_ends.reshape(-1)
+
+    def compute_labels_OC_world_model(self, embeddings: torch.Tensor, rewards: torch.Tensor, ends: torch.Tensor, mask_padding: torch.BoolTensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert torch.all(ends.sum(dim=1) <= 1)  # at most 1 done
+        mask_fill = torch.logical_not(mask_padding)
+        labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
+        labels_ends = ends.masked_fill(mask_fill, -100)
+        end_positions = mask_fill.repeat_interleave(embeddings.shape[2], dim=1) if embeddings.dim() == 4 else mask_fill.repeat_interleave(embeddings.shape[1], dim=1) 
+        end_positions = end_positions.unsqueeze(2).repeat(1,1,embeddings.shape[-1])[:,self.config.tokens_per_block:]
+        return end_positions, labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
 
 class PositionalEmbedding(nn.Module):

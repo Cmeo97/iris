@@ -6,24 +6,28 @@ defaults:
   - env: default
   - datasets: default
 
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    #dir: /home/mila/c/cristian.meo/scratch/iris_log/${env.train.id}/${world_model.model}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
 wandb:
   mode: online
-  project: IRIS-dinosaur
-  entity: null
-  name: null
-  group: null
+  project: OC-IRIS
+  entity: cmeo97
+  name: OC-iris-trial
+  group: iris
   tags: null
   notes: null
 
-# hydra:
-#   run:
-#     dir: outputs/2023-11-15/00-47-03/
 
 initialization:
-  path_to_checkpoint: null
-  load_tokenizer: False
+  path_to_checkpoint: /space/cristianmeo/iris/outputs/OC-extractor/checkpoints/last.pt
+  load_tokenizer: True
   load_world_model: False
   load_actor_critic: False
+
+
 # initialization:
 #   path_to_checkpoint: checkpoints/last.pt
 #   load_tokenizer: True
@@ -36,8 +40,7 @@ common:
   do_checkpoint: True
   seed: 0
   sequence_length: ${world_model.max_blocks}
-  resume: False
-  # resume: True # set by resume.sh script only.
+  resume: False # set by resume.sh script only.
   slot_based: True
   use_pretrained: False
 
@@ -75,17 +78,17 @@ training:
     steps_per_epoch: 200
   world_model:
     batch_num_samples: 16
-    grad_acc_steps: 4
+    grad_acc_steps: 1
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 600
+    start_after_epochs: 5
     steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 4
     grad_acc_steps: 16
     max_grad_norm: 10.0
     start_after_epochs: 650
-    steps_per_epoch: 200
+    steps_per_epoch: 2
     imagine_horizon: ${common.sequence_length}
     burn_in: 20
     gamma: 0.995
@@ -94,7 +97,7 @@ training:
 
 evaluation:
   should: True
-  every: 20
+  every: 10
   tokenizer:
     batch_num_samples: ${training.tokenizer.batch_num_samples}
     start_after_epochs: ${training.tokenizer.start_after_epochs}

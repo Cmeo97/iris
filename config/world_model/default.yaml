@@ -8,8 +8,8 @@ embed_dim: 256
 embed_pdrop: 0.1
 resid_pdrop: 0.1
 attn_pdrop: 0.1
-model: 'irisXL-discrete'
-dyn_embed_dim: 256
+model: 'iris'
+continuos_embed_dim: 512
 dyn_num_heads: 4
 dyn_num_layers: 10
 dyn_feedforward_dim: 1024
@@ -38,3 +38,6 @@ regularization_post_quant: False
 regularization_tokens: False
 regularization_embeddings: False
 embedding_input: False
+slot_based: False
+slot_regularization: False
+regularization_k_pred: False

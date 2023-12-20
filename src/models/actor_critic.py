@@ -45,7 +45,7 @@ class ActorCritic(nn.Module):
         self.linear_actor = linear_actor
         self.model = model
         self.lstm_dim = 512
-
+       
         if not latent_actor:
             self.conv1 = nn.Conv2d(3, 32, 3, stride=1, padding=1)
             self.maxp1 = nn.MaxPool2d(2, 2)
@@ -105,11 +105,13 @@ class ActorCritic(nn.Module):
             x = F.relu(self.maxp4(self.conv4(x)))
             x = torch.flatten(x, start_dim=1)
         #elif collecting:
+        elif inputs.dim() > 3:
+                if isinstance(wm.embedder, nn.ModuleDict): # irisXL
+                    x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
+                else: # vanilla iris 
+                    x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
         else:
-            if isinstance(wm.embedder, nn.ModuleDict): # irisXL
-                x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
-            else: # vanilla iris 
-                x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
+            x = inputs
       
 
 
@@ -190,10 +192,9 @@ class ActorCritic(nn.Module):
                 else:
                     b, l, t = burnin_tokens_obs.shape
                     burnin_encodings = wm_env.world_model.embedder['z'](burnin_tokens_obs)
-                self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1])
-                _ = wm_env.reset_from_embeddings(burnin_observations=burnin_encodings)
+                self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1]) 
+                #_ = wm_env.reset_from_initial_embeddings(burnin_observations=burnin_encodings)
             
-            self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1])
         if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
             embedder = wm_env.world_model.embedder['z'].eval()
             mems = wm_env.world_model.transformer.transformer.init_mems()  # Memory Initialization 
@@ -236,7 +237,7 @@ class ActorCritic(nn.Module):
         assert not self.use_original_obs
         observations = batch['observations']
         mask_padding = batch['mask_padding']
-        assert observations.ndim == 5 and observations.shape[2:] == (3, 64, 64)
+        assert observations.ndim == 5 and (observations.shape[2:] == (3, 64, 64) or observations.shape[2:] == (3, 224, 224)) 
         assert mask_padding[:, -1].all()
         device = observations.device
         wm_env = WorldModelEnv(tokenizer, world_model, device, model=self.model)
@@ -253,13 +254,16 @@ class ActorCritic(nn.Module):
         else:
             mems = None
         
-        obs, _ = wm_env.reset_from_initial_observations(observations[:, 0])
+        obs, tokens = wm_env.reset_from_initial_observations(observations[:, 0])
+        if tokenizer.slot_based:
+            obs, colors, masks = obs
         stop_mask = torch.zeros((obs.shape[0], 1), device=obs.device) # Stop Mask initialization
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Rollout', file=sys.stdout):
 
             action_token = rearrange(batch['actions'][:, k], 'b -> b 1 1')
+            tokens = {'a': action_token, 'z': tokens}
             if tokenizer.slot_based:
-                obs, reward, done, mems, color, mask, _ = wm_env.step(action_token, should_predict_next_obs=True, should_return_slots=True)
+                obs, reward, done, mems, color, mask, tokens = wm_env.step(tokens, mems, True, stop_mask, should_return_slots=True, obs=observations[:,k+1])
                 all_colors.append(color)
                 all_masks.append(mask)
             else:

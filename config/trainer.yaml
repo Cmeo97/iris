@@ -15,24 +15,26 @@ wandb:
   mode: online
   project: IRIS
   entity: cmeo97
-  name: exp_vanilla-iris-atari
+  name: exp_continuos-iris-boxing-first-trial
   group: iris
   tags: null
   notes: null
 
 initialization:
-  path_to_checkpoint: /space/cristianmeo/iris/outputs/2023-11-10/17-36-33/checkpoints/last.pt
+  path_to_checkpoint: /space/cristianmeo/iris/outputs/2023-12-07/20-46-58/checkpoints/last.pt
   load_tokenizer: True
   load_world_model: False
   load_actor_critic: False
 
 common:
   epochs: 600
-  device: cuda:2
+  device: cuda:0
   do_checkpoint: True
   seed: 0
   sequence_length: ${world_model.max_blocks}
   resume: False # set by resume.sh script only.
+  use_pretrained: False
+  slot_based: False
 
 collection:
   train:
@@ -61,23 +63,22 @@ training:
   sampling_weights: [0.125, 0.125, 0.25, 0.5]
   tokenizer:
     batch_num_samples: 16
-    grad_acc_steps: 16
+    grad_acc_steps: 1
     max_grad_norm: 10.0
-    start_after_epochs: 6
+    start_after_epochs: 25
     steps_per_epoch: 200
   world_model:
     batch_num_samples: 64
     grad_acc_steps: 1
     max_grad_norm: 10
     weight_decay: 0.01
-    start_after_epochs: 5
+    start_after_epochs: 50
     steps_per_epoch: 200
-
   actor_critic:
     batch_num_samples: 16
-    grad_acc_steps: 4
+    grad_acc_steps: 1
     max_grad_norm: 10.0
-    start_after_epochs: 5
+    start_after_epochs: 75
     steps_per_epoch: 200
     imagine_horizon: ${common.sequence_length}
     burn_in: 20

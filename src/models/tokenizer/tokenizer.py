@@ -936,6 +936,8 @@ class OCSAMTokenizer(OCTokenizer):
 
         if self.slot_attn.is_video:
             z = z.reshape(*shape[:-3], *z.shape[1:]) # video
+            if z.dim() == 3:
+                z = z.unsqueeze(1)
         z, inits = self.slot_attn(z)
         if self.slot_attn.is_video:
             z = z.view(-1, *z.shape[-2:]) # video
@@ -968,10 +970,9 @@ class OCSAMTokenizer(OCTokenizer):
         masks_as_image = masks_as_image.reshape(*shape[:-2], *masks_as_image.shape[1:])
         if should_postprocess:
             rec = self.postprocess_output(rec)
-        if len(x.shape) == 4:
-            colors = x.unsqueeze(-4).expand(-1, self.num_slots, -1, -1, -1)
-        else:
-            colors = x.unsqueeze(-4).expand(-1, -1, self.num_slots, -1, -1, -1)
+        
+        colors = x.unsqueeze(-4).expand(-1, self.num_slots, -1, -1, -1) if len(x.shape) == 4 else x.unsqueeze(-4).expand(-1, -1, self.num_slots, -1, -1, -1)
+      
         return x, colors, masks_as_image.unsqueeze(-3)
     
     @torch.no_grad()

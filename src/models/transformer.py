@@ -23,13 +23,12 @@ class TransformerConfig:
     num_layers: int
     num_heads: int
     embed_dim: int
-
+    continuos_embed_dim: int
     embed_pdrop: float
     resid_pdrop: float
     attn_pdrop: float
 
     model: str
-    dyn_embed_dim: int
     dyn_num_heads: int
     dyn_num_layers: int
     dyn_feedforward_dim: int
@@ -58,6 +57,9 @@ class TransformerConfig:
     regularization_post_quant: bool
     regularization_tokens: bool
     regularization_embeddings: bool
+    slot_based: bool
+    slot_regularization: bool
+    regularization_k_pred: bool
 
     @property
     def max_tokens(self):
