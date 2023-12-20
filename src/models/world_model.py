@@ -385,7 +385,7 @@ class WorldModel(nn.Module):
 
             end_positions, labels_rewards, labels_ends = self.compute_labels_OC_world_model(obs_embeddings, batch['rewards'], batch['ends'], batch['mask_padding'])
 
-            loss_embeddings = F.mse_loss(outputs.embeddings[:, :-self.config.tokens_per_block], rearrange(obs_embeddings, 'b t e o  -> b (t e) o')[:, self.config.tokens_per_block:], reduction='none')
+            loss_embeddings = F.mse_loss(outputs.embeddings[:, :-(self.config.tokens_per_block-1)], rearrange(obs_embeddings, 'b t e o  -> b (t e) o')[:, (self.config.tokens_per_block-1):], reduction='none')
             loss_embeddings[end_positions] *= 0
            
             loss_rewards = F.cross_entropy(rearrange(outputs.logits_rewards, 'b t e -> (b t) e'), labels_rewards)
@@ -566,7 +566,7 @@ class WorldModel(nn.Module):
         labels_rewards = (rewards.sign() + 1).masked_fill(mask_fill, -100).long()  # Rewards clipped to {-1, 0, 1}
         labels_ends = ends.masked_fill(mask_fill, -100)
         end_positions = mask_fill.repeat_interleave(embeddings.shape[2], dim=1) if embeddings.dim() == 4 else mask_fill.repeat_interleave(embeddings.shape[1], dim=1) 
-        end_positions = end_positions.unsqueeze(2).repeat(1,1,embeddings.shape[-1])[:,self.config.tokens_per_block:]
+        end_positions = end_positions.unsqueeze(2).repeat(1,1,embeddings.shape[-1])[:,(self.config.tokens_per_block-1):]
         return end_positions, labels_rewards.reshape(-1), labels_ends.reshape(-1)
 
 

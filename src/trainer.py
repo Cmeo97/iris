@@ -324,7 +324,7 @@ class Trainer:
         batch = self.train_dataset.sample_batch(batch_num_samples=5, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
         recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
         if self.agent.tokenizer.slot_based:
-            recons, masks, colors = recons
+            recons, colors, masks = recons
         def save_sequence_image(observations, recons, save_dir, epoch, suffix='sample'):
             b, t, _, _, dim = observations.size()
             
@@ -347,7 +347,7 @@ class Trainer:
 
                 full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
                 color = colors[i].cpu()
-                mask = masks[i].cpu()
+                mask = masks[i].repeat(1,1,3,1,1).cpu()
                 subimage = color * mask
                 full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)
                 full_plot = full_plot.permute(1, 0, 2, 3, 4).contiguous()  # (H,W,3,D,D)

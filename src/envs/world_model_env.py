@@ -207,7 +207,7 @@ class WorldModelEnv:
                     h = outputs_wm.embeddings
                     output_sequence.append(outputs_wm.embeddings)
 
-            self.embedded_tokens = self.obs_tokens = output_sequence # (B, 1 + K, E)
+            self.embedded_tokens = self.obs_tokens = torch.stack(output_sequence, dim=1) # (B, 1 + K, E)
       
             obs = self.decode_obs_tokens() if should_predict_next_obs else None
             
@@ -247,7 +247,7 @@ class WorldModelEnv:
             rec, color, mask = self.tokenizer.decode_slots(self.obs_tokens, observations)         # (B, C, H, W)
             return torch.clamp(rec, 0, 1), color, mask
         else:
-            embedded_tokens = self.tokenizer.embedding(self.obs_tokens) if self.embedded_tokens == None else self.embedded_tokens    # (B, K, E)
+            embedded_tokens = self.tokenizer.embedding(self.obs_tokens) if self.embedded_tokens == None else self.embedded_tokens.squeeze(2)    # (B, K, E)
             z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(self.num_observations_tokens)))
             rec = self.tokenizer.decode(z, should_postprocess=True)         # (B, C, H, W)
             return torch.clamp(rec, 0, 1)
