@@ -22,8 +22,8 @@ wandb:
   # entity: null
   # name: null
   # group: null
-  # tags: null
-  # notes: null
+  tags: null
+  notes: null
 
 
 initialization:
