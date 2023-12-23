@@ -7,28 +7,28 @@ defaults:
   - env: default
   - datasets: default
 
-# hydra:
-#   run:
-#     dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
     #dir: /home/mila/c/cristian.meo/scratch/iris_log/${env.train.id}/${world_model.model}/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 wandb:
   mode: online
-  # project: OC-IRIS
-  # entity: cmeo97
-  # name: OC-iris-trial
-  # group: iris
-  project: IRIS-dinousaur
-  entity: null
-  name: null
-  group: null
-  tags: null
-  notes: null
+  project: OC-IRIS
+  entity: cmeo97
+  name: OC-iris-trial
+  group: iris
+  # project: IRIS-dinousaur
+  # entity: null
+  # name: null
+  # group: null
+  # tags: null
+  # notes: null
 
 
 initialization:
-  # path_to_checkpoint: /space/cristianmeo/iris/outputs/OC-extractor/checkpoints/last.pt
-  path_to_checkpoint: null
+  path_to_checkpoint: /space/cristianmeo/iris/outputs/OC-extractor/checkpoints/last.pt
+  # path_to_checkpoint: null
   load_tokenizer: True
   load_world_model: False
   load_actor_critic: False
