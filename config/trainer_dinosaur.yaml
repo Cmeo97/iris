@@ -87,7 +87,7 @@ training:
     grad_acc_steps: 1
     max_grad_norm: 10.0
     weight_decay: 0.01
-    start_after_epochs: 500
+    start_after_epochs: 5
     steps_per_epoch: 200
   actor_critic:
     batch_num_samples: 4
@@ -105,7 +105,7 @@ training:
     batch_num_samples: 16
     grad_acc_steps: 1
     max_grad_norm: 1.0
-    start_after_epochs: 100
+    start_after_epochs: 5
     steps_per_epoch: 200
 
 evaluation:
