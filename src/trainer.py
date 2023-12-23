@@ -105,8 +105,9 @@ class Trainer:
         tokenizer = instantiate(cfg.tokenizer)
         world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
         actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model)
+        image_decoder = instantiate(cfg.image_decoder)
 
-        self.agent = Agent(tokenizer, world_model, actor_critic).to(self.device)
+        self.agent = Agent(tokenizer, world_model, actor_critic, image_decoder).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
         print(f'{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model')
         print(f'{sum(p.numel() for p in self.agent.actor_critic.parameters())} parameters in agent.actor_critic')
@@ -114,14 +115,17 @@ class Trainer:
         tokenizer_lr = cfg.training.learning_rate if "learning_rate" not in cfg.training.tokenizer else cfg.training.tokenizer.learning_rate
         world_model_lr = cfg.training.learning_rate if "learning_rate" not in cfg.training.world_model else cfg.training.world_model.learning_rate
         actor_critic_lr = cfg.training.learning_rate if "learning_rate" not in cfg.training.actor_critic else cfg.training.actor_critic.learning_rate
+        image_decoder_lr = cfg.training.learning_rate if "learning_rate" not in cfg.training.image_decoder else cfg.training.image_decoder.learning_rate
         self.optimizer_tokenizer = torch.optim.Adam(self.agent.tokenizer.parameters(), lr=tokenizer_lr)
         self.optimizer_world_model = configure_optimizer(self.agent.world_model, world_model_lr, cfg.training.world_model.weight_decay)
         self.optimizer_actor_critic = torch.optim.Adam(self.agent.actor_critic.parameters(), lr=actor_critic_lr)
+        self.optimizer_image_decoder = torch.optim.Adam(self.agent.image_decoder.parameters(), lr=image_decoder_lr)
 
         # self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(1000, 0.5, 10000))
         self.scheduler_tokenizer = LambdaLR(self.optimizer_tokenizer, lr_lambda=linear_warmup_exp_decay(10000, 0.5, 100000))
         self.scheduler_world_model = None
         self.scheduler_actor_critic = None
+        self.scheduler_image_decoder = None
 
         if cfg.initialization.path_to_checkpoint is not None:
             self.agent.load(**cfg.initialization, device=self.device)
@@ -178,11 +182,12 @@ class Trainer:
         self.agent.train()
         self.agent.zero_grad()
 
-        metrics_tokenizer, metrics_world_model, metrics_actor_critic = {}, {}, {}
+        metrics_tokenizer, metrics_world_model, metrics_actor_critic, metrics_image_decoder = {}, {}, {}, {}
 
         cfg_tokenizer = self.cfg.training.tokenizer
         cfg_world_model = self.cfg.training.world_model
         cfg_actor_critic = self.cfg.training.actor_critic
+        cfg_image_decoder = self.cfg.training.image_decoder
         
         if self.cfg.world_model.regularization_post_quant:
             cfg_world_model.batch_num_samples = 16
@@ -191,7 +196,7 @@ class Trainer:
         w = self.cfg.training.sampling_weights
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=self.cfg.common.sequence_length, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
+            metrics_tokenizer = self.train_component(self.agent.tokenizer, self.optimizer_tokenizer, self.scheduler_tokenizer, sequence_length=4, sample_from_start=True, sampling_weights=w, **cfg_tokenizer)
 
         self.agent.tokenizer.eval()
 
@@ -203,7 +208,10 @@ class Trainer:
             metrics_actor_critic = self.train_component(self.agent.actor_critic, self.optimizer_actor_critic, self.scheduler_actor_critic, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False, sampling_weights=w, tokenizer=self.agent.tokenizer, world_model=self.agent.world_model, **cfg_actor_critic)
         self.agent.actor_critic.eval()
 
-        return [{'epoch': epoch, **metrics_tokenizer, **metrics_world_model, **metrics_actor_critic}]
+        if epoch > cfg_image_decoder.start_after_epochs:
+            metrics_image_decoder = self.train_component(self.agent.image_decoder, self.optimizer_image_decoder, self.scheduler_image_decoder, sequence_length=4, sample_from_start=True, sampling_weights=w, **cfg_image_decoder)
+
+        return [{'epoch': epoch, **metrics_tokenizer, **metrics_world_model, **metrics_actor_critic, **metrics_image_decoder}]
 
     def train_component(self, component: nn.Module, optimizer: torch.optim.Optimizer, scheduler: Optional[Union[torch.optim.lr_scheduler._LRScheduler, None]], steps_per_epoch: int, batch_num_samples: int, grad_acc_steps: int, max_grad_norm: Optional[float], sequence_length: int, sampling_weights: Optional[Tuple[float]], sample_from_start: bool, **kwargs_loss: Any) -> Dict[str, float]:
         if not isinstance(max_grad_norm, float):
@@ -217,7 +225,12 @@ class Trainer:
                 batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sampling_weights, sample_from_start)
                 batch = self._to_device(batch)
 
-                losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
+                if str(component) == 'image_decoder':
+                    with torch.no_grad():
+                        z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
+                    losses = component.compute_loss(batch, z, **kwargs_loss) / grad_acc_steps
+                else:
+                    losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
                 loss_total_step = losses.loss_total
                 loss_total_step.backward()
                 loss_total_epoch += loss_total_step.item() / steps_per_epoch
@@ -263,7 +276,7 @@ class Trainer:
             tr_batch = self._to_device(self.train_dataset.sample_batch(batch_num_samples=2, sequence_length=self.cfg.common.sequence_length))
             if self.slot_based:
                 batch['observations'] = torch.cat([batch['observations'], tr_batch['observations']], dim=0)
-                make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
+                make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer, image_decoder=self.agent.image_decoder)
                 # self.inspect_world_model(epoch)
             else:
                 make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
@@ -280,7 +293,11 @@ class Trainer:
         for batch in self.test_dataset.traverse(batch_num_samples, sequence_length):
             batch = self._to_device(batch)
 
-            losses = component.compute_loss(batch, **kwargs_loss)
+            if str(component) == 'image_decoder':
+                z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
+                losses = component.compute_loss(batch, z, **kwargs_loss)
+            else:
+                losses = component.compute_loss(batch, **kwargs_loss)
             loss_total_epoch += losses.loss_total.item()
 
             for loss_name, loss_value in losses.intermediate_losses.items():
