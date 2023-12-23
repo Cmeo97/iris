@@ -38,14 +38,15 @@ class ImagineOutput:
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, act_vocab_size, use_original_obs: bool = False, model: str = 'iris', latent_actor: bool = False, linear_actor: bool = True) -> None:
+    def __init__(self, act_vocab_size, use_original_obs: bool = False, model: str = 'iris', latent_actor: bool = False, linear_actor: bool = True, tokenizer: Tokenizer = None) -> None:
         super().__init__()
         self.use_original_obs = use_original_obs
         self.latent_actor = latent_actor
         self.linear_actor = linear_actor
         self.model = model
+        self.tokenizer = tokenizer
         self.lstm_dim = 512
-       
+        self.recursive_actor = False
         if not latent_actor:
             self.conv1 = nn.Conv2d(3, 32, 3, stride=1, padding=1)
             self.maxp1 = nn.MaxPool2d(2, 2)
@@ -57,9 +58,10 @@ class ActorCritic(nn.Module):
             self.maxp4 = nn.MaxPool2d(2, 2)
             self.lstm = nn.LSTMCell(1024, self.lstm_dim)
         else:
-            self.lstm = nn.LSTMCell(1024, self.lstm_dim) 
+
+            self.lstm = nn.LSTMCell(256, self.lstm_dim) if self.recursive_actor else nn.LSTMCell(256*tokenizer.num_slots, self.lstm_dim)
             self.tanh = nn.Tanh()
-            self.linear = nn.Linear(256, 1024)
+            self.linear = nn.Linear(128, 256)
 
         self.hx, self.cx = None, None
         if self.linear_actor:
@@ -91,7 +93,7 @@ class ActorCritic(nn.Module):
         self.hx = self.hx[mask]
         self.cx = self.cx[mask]
 
-    def forward(self, inputs: torch.FloatTensor, mask_padding: Optional[torch.BoolTensor] = None, collecting: bool = False, tokenizer: Tokenizer = None, wm: WorldModelEnv = None) -> ActorCriticOutput:
+    def forward(self, inputs: torch.FloatTensor, mask_padding: Optional[torch.BoolTensor] = None, collecting: bool = False, wm: WorldModelEnv = None) -> ActorCriticOutput:
         if not self.latent_actor:
             assert inputs.ndim == 4 and inputs.shape[1:] == (3, 64, 64)
             assert 0 <= inputs.min() <= 1 and 0 <= inputs.max() <= 1
@@ -107,17 +109,16 @@ class ActorCritic(nn.Module):
         #elif collecting:
         elif inputs.dim() > 3:
                 if isinstance(wm.embedder, nn.ModuleDict): # irisXL
-                    x = wm.embedder['z'](tokenizer.encode(inputs).tokens)
+                    x = self.tokenizer.encode(inputs).z if hasattr(self.tokenizer, 'slot_based') else wm.embedder['z'](self.tokenizer.encode(inputs).tokens) 
                 else: # vanilla iris 
-                    x = wm.embedder.embedding_tables[1](tokenizer.encode(inputs).tokens)
+                    x = wm.embedder.embedding_tables[1](self.tokenizer.encode(inputs).tokens)
         else:
             x = inputs
       
-
-
         if self.latent_actor: 
-            x = self.tanh(x)
-            x = self.linear(x)
+            x = rearrange(self.tanh(self.linear(x)), 'b s e -> b (s e)')
+
+        if self.recursive_actor:
             for i in range(x.shape[1]):
                 if mask_padding is None:
                     self.hx, self.cx = self.lstm(x[:, i], (self.hx, self.cx))
@@ -127,18 +128,57 @@ class ActorCritic(nn.Module):
             if mask_padding is None:
                 self.hx, self.cx = self.lstm(x, (self.hx, self.cx))
             else:
-                self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x, (self.hx[mask_padding], self.cx[mask_padding]))
-                if mask_padding.any() == False:
-                    print('mask_padding_false')
+                self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x[mask_padding], (self.hx[mask_padding], self.cx[mask_padding]))
+              
 
       
         logits_actions = rearrange(self.actor_linear(self.hx), 'b a -> b 1 a')
         means_values = rearrange(self.critic_linear(self.hx), 'b 1 -> b 1 1')
 
         return ActorCriticOutput(logits_actions, means_values)
+    
+    def collecting(self, inputs: torch.FloatTensor, mask_padding: Optional[torch.BoolTensor] = None, collecting: bool = False, wm: WorldModelEnv = None) -> ActorCriticOutput:
+
+        if wm.config.model=='irisXL-discrete' or wm.config.model=='irisXL-continuos':
+            x = wm.embedder['z'](self.tokenizer.encode(inputs).tokens) 
+        elif wm.config.model=='OC-irisXL':
+            x = self.tokenizer.encode(inputs).z  
+        else: # vanilla iris 
+            x = wm.embedder.embedding_tables[1](self.tokenizer.encode(inputs).tokens)
+   
+        if self.latent_actor: 
+            x = rearrange(self.tanh(self.linear(x)), 'b s e -> b (s e)')
+        else:
+            assert inputs.ndim == 4 and inputs.shape[1:] == (3, 64, 64)
+            assert 0 <= inputs.min() <= 1 and 0 <= inputs.max() <= 1
+            assert mask_padding is None or (mask_padding.ndim == 1 and mask_padding.size(0) == inputs.size(0) and mask_padding.any())
+            x = inputs[mask_padding] if mask_padding is not None else inputs
+
+            x = x.mul(2).sub(1)
+            x = F.relu(self.maxp1(self.conv1(x)))
+            x = F.relu(self.maxp2(self.conv2(x)))
+            x = F.relu(self.maxp3(self.conv3(x)))
+            x = F.relu(self.maxp4(self.conv4(x)))
+            x = torch.flatten(x, start_dim=1)
+        
+        if self.recursive_actor:
+            for i in range(x.shape[1]):
+                if mask_padding is None:
+                    self.hx, self.cx = self.lstm(x[:, i], (self.hx, self.cx))
+                else:
+                    self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x[:, i], (self.hx[mask_padding], self.cx[mask_padding]))
+        else:
+            if mask_padding is None:
+                self.hx, self.cx = self.lstm(x, (self.hx, self.cx))
+            else:
+                self.hx[mask_padding], self.cx[mask_padding] = self.lstm(x[mask_padding], (self.hx[mask_padding], self.cx[mask_padding]))
+              
+        logits_actions = rearrange(self.actor_linear(self.hx), 'b a -> b 1 a')
+        means_values = rearrange(self.critic_linear(self.hx), 'b 1 -> b 1 1')
+
+        return ActorCriticOutput(logits_actions, means_values)
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel, imagine_horizon: int, gamma: float, lambda_: float, entropy_weight: float, **kwargs: Any) -> LossWithIntermediateLosses:
-        assert not self.use_original_obs
         outputs = self.imagine(batch, tokenizer, world_model, horizon=imagine_horizon)
 
         with torch.no_grad():
@@ -161,10 +201,10 @@ class ActorCritic(nn.Module):
         return LossWithIntermediateLosses(loss_actions=loss_actions, loss_values=loss_values, loss_entropy=loss_entropy)
 
     def imagine(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel, horizon: int, show_pbar: bool = False) -> ImagineOutput:
-        assert not self.use_original_obs
+        #assert not self.use_original_obs
         initial_observations = batch['observations']
         mask_padding = batch['mask_padding']
-        assert initial_observations.ndim == 5 and initial_observations.shape[2:] == (3, 64, 64)
+        assert initial_observations.ndim == 5 
         assert mask_padding[:, -1].all()
         device = initial_observations.device
         wm_env = WorldModelEnv(tokenizer, world_model, device, model=self.model)
@@ -183,35 +223,42 @@ class ActorCritic(nn.Module):
             self.reset(n=initial_observations.size(0), burnin_observations=burnin_observations, mask_padding=mask_padding[:, :-1])
         else:
             with torch.no_grad():
-                burnin_tokens_obs = tokenizer.encode(initial_observations[:, :-1], should_preprocess=True).tokens if initial_observations.size(1) > 1 else None
-                
-                if isinstance(wm_env.world_model.embedder, Embedder): # vanilla iris is used 
+                burnin_enc_obs = tokenizer.encode(initial_observations[:, :-1], should_preprocess=True) if initial_observations.size(1) > 1 else None
+                burnin_tokens_obs = burnin_encodings = burnin_enc_obs.z if self.model == 'OC-irisXL' or self.model == 'irisXL-continuos' else burnin_enc_obs.tokens
+                if self.model == 'iris' or self.model == 'irisXL-discrete': # vanilla iris is used 
                     b, l, t = burnin_tokens_obs.shape
                     burnin_tokens_obs = rearrange(burnin_tokens_obs, 'b l t -> b (l t)') 
-                    burnin_encodings = wm_env.world_model.embedder.embedding_tables[1](burnin_tokens_obs).reshape(b, l, t, -1)
-                else:
-                    b, l, t = burnin_tokens_obs.shape
-                    burnin_encodings = wm_env.world_model.embedder['z'](burnin_tokens_obs)
+                    burnin_encodings = wm_env.world_model.embedder.embedding_tables[1](burnin_tokens_obs).reshape(b, l, t, -1) if self.model == 'iris' else wm_env.world_model.embedder['z'](burnin_tokens_obs)
+                elif self.model == 'OC-irisXL' or self.model == 'irisXL-continuos':
+                    b, l, t, e = burnin_tokens_obs.shape
+                    burnin_encodings = wm_env.world_model.embedder['z'](rearrange(burnin_tokens_obs, 'b s t e -> b (s t) e')) if self.model == 'irisXL-continuos' else burnin_encodings
+                
+
                 self.reset(n=initial_observations.size(0), burnin_observations=burnin_encodings, mask_padding=mask_padding[:, :-1]) 
                 #_ = wm_env.reset_from_initial_embeddings(burnin_observations=burnin_encodings)
             
-        if isinstance(wm_env.world_model.embedder, nn.ModuleDict):
+        if self.model == 'irisXL-discrete' or self.model == 'irisXL-continuos':
             embedder = wm_env.world_model.embedder['z'].eval()
             mems = wm_env.world_model.transformer.transformer.init_mems()  # Memory Initialization 
-        else:
+        elif self.model == 'iris':
             embedder = wm_env.world_model.embedder.embedding_tables[1].eval()
             mems = None
+        elif self.model == 'OC-irisXL':
+            embedder = lambda x: x
+            mems = wm_env.world_model.transformer.transformer.init_mems()  
             
         obs, obs_tokens = wm_env.reset_from_initial_observations(initial_observations[:, -1])
+        if tokenizer.slot_based:
+            obs, color, mask = obs
         stop_mask = torch.zeros((obs_tokens.shape[0], 1), device=obs_tokens.device) # Stop Mask initialization
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Imagination', file=sys.stdout):
-        
+
             all_observations.append(obs)
             all_tokens_observations.append(obs_tokens)
-            
-            outputs_ac =  self(embedder(obs_tokens)) if self.latent_actor else self(obs) 
+            outputs_ac = self(embedder(obs_tokens)) if self.latent_actor else self(obs) 
             action_token = Categorical(logits=outputs_ac.logits_actions).sample()
-            obs, reward, done, mems, obs_tokens = wm_env.step(action_token, mems, should_predict_next_obs=(k < horizon - 1), stop_mask=stop_mask)
+            tokens = {'a': action_token, 'z': obs_tokens} if self.model == 'OC-irisXL' else action_token
+            _, reward, done, mems, obs_tokens = wm_env.step(tokens, mems, should_predict_next_obs=(k < horizon - 1 and not tokenizer.slot_based), stop_mask=stop_mask)
 
             all_actions.append(action_token)
             all_logits_actions.append(outputs_ac.logits_actions)
@@ -219,7 +266,7 @@ class ActorCritic(nn.Module):
             all_rewards.append(torch.tensor(reward).reshape(-1, 1))
             all_ends.append(torch.tensor(done).reshape(-1, 1))
             stop_mask = torch.stack(all_ends, dim=1).squeeze(2) if len(all_ends) > 1 else torch.tensor(done).reshape(-1, 1)
-
+            
         self.clear()
         return ImagineOutput(
         observations=torch.stack(all_observations, dim=1).mul(255).byte(),      # (B, T, C, H, W) in [0, 255]
@@ -234,7 +281,7 @@ class ActorCritic(nn.Module):
         
     @torch.no_grad()
     def rollout(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel, horizon: int, show_pbar: bool = False) -> ImagineOutput:
-        assert not self.use_original_obs
+       
         observations = batch['observations']
         mask_padding = batch['mask_padding']
         assert observations.ndim == 5 and (observations.shape[2:] == (3, 64, 64) or observations.shape[2:] == (3, 224, 224)) 
@@ -256,7 +303,8 @@ class ActorCritic(nn.Module):
         
         obs, tokens = wm_env.reset_from_initial_observations(observations[:, 0])
         if tokenizer.slot_based:
-            obs, colors, masks = obs
+            obs, color, mask = obs
+       
         stop_mask = torch.zeros((obs.shape[0], 1), device=obs.device) # Stop Mask initialization
         for k in tqdm(range(horizon), disable=not show_pbar, desc='Rollout', file=sys.stdout):
 

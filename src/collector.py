@@ -44,11 +44,13 @@ class Collector:
             mask_padding = torch.stack([episode.mask_padding for episode in segmented_episodes], dim=0).to(agent.device)
             burnin_obs = torch.stack([episode.observations for episode in segmented_episodes], dim=0).float().div(255).to(agent.device)
             if agent.actor_critic.latent_actor:
-                burnin_tokens = agent.tokenizer.encode(burnin_obs).tokens
+                burnin_tokens = agent.tokenizer.encode(burnin_obs).z if hasattr(agent.tokenizer, 'slot_based') else agent.tokenizer.encode(burnin_obs).tokens 
                 if isinstance(agent.world_model.embedder, nn.ModuleDict): # irisXL
                     burnin_embeddings= agent.world_model.embedder['z'](burnin_tokens)
+                elif hasattr(agent.tokenizer, 'slot_based'):
+                    burnin_embeddings = burnin_tokens
                 else: # vanilla iris 
-                    burnin_embeddings= agent.world_model.embedder.embedding_tables[1](burnin_tokens)
+                    burnin_embeddings = agent.world_model.embedder.embedding_tables[1](burnin_tokens)
             else:
                 burnin_obs_rec = torch.clamp(agent.tokenizer.encode_decode(burnin_obs, should_preprocess=True, should_postprocess=True), 0, 1)
 
