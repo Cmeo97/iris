@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from typing import List
 from math import sqrt
 from typing import List, Optional, Union, Tuple
+from einops import rearrange
 from torch import Tensor
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from omegaconf import ListConfig
+from utils import LossWithIntermediateLosses
+
 from .transformer_utils import *
 
 
@@ -601,8 +605,15 @@ class SAEncoder(nn.Module):
         out = self.conv_1x1(out)
         return out
     
+@dataclass
+class SBDConfig:
+    resolution: int
+    dec_input_dim: int # SBDecoder
+    dec_hidden_dim: int # SBDecoder
+    out_ch: int
+
 class SpatialBroadcastDecoder(nn.Module):
-    def __init__(self, config: OCEncoderDecoderConfig) -> None:
+    def __init__(self, config: SBDConfig) -> None:
         super().__init__()
         self.config = config
         hidden_dim = config.dec_hidden_dim
@@ -638,7 +649,8 @@ class SpatialBroadcastDecoder(nn.Module):
             )
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
-        self.init_resolution = resolution if hidden_dim == 32 else (8, 8)
+        # self.init_resolution = resolution if hidden_dim == 32 else (8, 8)
+        self.init_resolution = resolution if hidden_dim == 32 else (28, 28)
         self.pos_embedding = PositionalEmbedding(self.init_resolution, config.dec_input_dim)
         self.resolution = resolution
         self._init_params()
@@ -653,6 +665,9 @@ class SpatialBroadcastDecoder(nn.Module):
             else:
                 nn.init.xavier_uniform_(tensor)
 
+    def __repr__(self) -> str:
+        return "image_decoder"
+    
     def forward(self, x: torch.Tensor, return_indiv_slots=False) -> torch.Tensor:
         bs = x.shape[0]
         K = x.shape[2] * x.shape[3]
@@ -676,7 +691,21 @@ class SpatialBroadcastDecoder(nn.Module):
         slot = slot.reshape(-1, slot.shape[-1])
         slot = slot.unsqueeze(-1).unsqueeze(-1)
         return slot.repeat(1, 1, self.init_resolution[0], self.init_resolution[1])
+    
+    def compute_loss(self, batch, z, **kwargs) -> LossWithIntermediateLosses:
+        observations = self.preprocess_input(batch['observations'])
+        shape = observations.shape
 
+        reconstructions = self(rearrange(z, 'b t k d -> (b t) d k').unsqueeze(-1))
+        reconstructions = rearrange(reconstructions, '(b t) c h w -> b t c h w', b=shape[0])
+
+        loss = torch.pow(observations - reconstructions, 2).mean()
+
+        return LossWithIntermediateLosses(reconstruction_loss=loss)
+    
+    def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
+        """x is supposed to be channels first and in [0, 1]"""
+        return x.mul(2).sub(1)
 
 class SlotAttention(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:

@@ -4,7 +4,7 @@ Credits to https://github.com/CompVis/taming-transformers
 
 import enum
 from dataclasses import dataclass
-from typing import Any, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 from einops import rearrange
 import math

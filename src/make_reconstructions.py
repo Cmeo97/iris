@@ -36,15 +36,19 @@ def make_reconstructions_from_batch(batch, save_dir, epoch, tokenizer):
     return
 
 @torch.no_grad()
-def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer, try_hard=False):
+def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer, image_decoder=None, try_hard=False):
     # check_batch(batch)
 
     inputs = rearrange(batch['observations'], 'b t c h w -> (b t) c h w')
     if tokenizer.slot_attn.is_video:
         inputs = batch['observations'] # video
     outputs = reconstruct_through_tokenizer_with_slots(inputs, tokenizer)
+    if image_decoder is not None:
+        z, inits, z_vit, feat_recon = tokenizer(inputs, should_preprocess=True)
+        recons = image_decoder(rearrange(z, 'b t k d -> (b t) d k').unsqueeze(-1))
+        recons = rearrange(recons, '(b t) c h w -> b t c h w', b=z.shape[0])
     b, t, _, _, _ = batch['observations'].size()
-    recons, colors, masks = outputs
+    _, colors, masks = outputs
     if not tokenizer.slot_attn.is_video:
         recons = rearrange(recons, '(b t) c h w -> b t c h w', b=b, t=t) # commentout for video
         colors = rearrange(colors, '(b t) k c h w -> b t k c h w', b=b, t=t) # commentout for video
