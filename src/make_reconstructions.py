@@ -47,6 +47,8 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
         z, inits, z_vit, feat_recon = tokenizer(inputs, should_preprocess=True)
         recons = image_decoder(rearrange(z, 'b t k d -> (b t) d k').unsqueeze(-1))
         recons = rearrange(recons, '(b t) c h w -> b t c h w', b=z.shape[0])
+    else:
+        recons = inputs
     b, t, _, _, _ = batch['observations'].size()
     _, colors, masks = outputs
     if not tokenizer.slot_attn.is_video:

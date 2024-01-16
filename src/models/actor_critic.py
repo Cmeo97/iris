@@ -45,7 +45,8 @@ class ActorCritic(nn.Module):
         self.linear_actor = linear_actor
         self.model = model
         self.tokenizer = tokenizer
-        self.lstm_dim = 512
+        self.lstm_dim = 1024
+        self.embed_dim = 512
         self.recursive_actor = False
         if not latent_actor:
             self.conv1 = nn.Conv2d(3, 32, 3, stride=1, padding=1)
@@ -59,17 +60,17 @@ class ActorCritic(nn.Module):
             self.lstm = nn.LSTMCell(1024, self.lstm_dim)
         else:
 
-            self.lstm = nn.LSTMCell(256, self.lstm_dim) if self.recursive_actor else nn.LSTMCell(256*tokenizer.num_slots, self.lstm_dim)
+            self.lstm = nn.LSTMCell(self.embed_dim, self.lstm_dim) if self.recursive_actor else nn.LSTMCell(self.embed_dim*tokenizer.num_slots, self.lstm_dim)
             self.tanh = nn.Tanh()
-            self.linear = nn.Linear(128, 256)
+            self.linear = nn.Linear(128, self.embed_dim)
 
         self.hx, self.cx = None, None
         if self.linear_actor:
-            self.critic_linear = nn.Linear(512, 1)
-            self.actor_linear = nn.Linear(512, act_vocab_size)
+            self.critic_linear = nn.Linear(self.lstm_dim, 1)
+            self.actor_linear = nn.Linear(self.lstm_dim, act_vocab_size)
         else:
-            self.critic_linear = MLP(512, [128, 128], 1, 'tanh', pre_activation=True)
-            self.actor_linear = MLP(512, [128, 128], act_vocab_size, 'tanh', pre_activation=True)
+            self.critic_linear = MLP(self.lstm_dim, [512, 256, 128], 1, 'tanh', pre_activation=True)
+            self.actor_linear = MLP(self.lstm_dim, [512, 256, 128], act_vocab_size, 'tanh', pre_activation=True)
 
     def __repr__(self) -> str:
         return "actor_critic"

@@ -1,6 +1,6 @@
 import math
-from typing import List
-
+from typing import List, Optional
+from einops import rearrange
 import torch
 import torch.nn as nn
 
@@ -30,8 +30,11 @@ class Head(Slicer):
         assert isinstance(head_module, nn.Module)
         self.head_module = head_module
 
-    def forward(self, x: torch.Tensor, num_steps: int, prev_steps: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, num_steps: int, prev_steps: int, rearr: bool = False, tgt_length: Optional[int] = None) -> torch.Tensor:
         x_sliced = x[:, self.compute_slice(num_steps, prev_steps)]  # x is (B, T, E)
+        if rearr:
+            b, _, _ = x_sliced.shape
+            x_sliced = x_sliced.reshape(b, tgt_length, -1)
         return self.head_module(x_sliced)
 
 
