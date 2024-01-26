@@ -54,6 +54,7 @@ class WorldModelEnv:
             _ = self.refresh_keys_values_with_initial_obs_tokens(self.obs_tokens)
         #self.obs_logits = self.tokenizer.encode_logits(outputs.z) # need to use logits instead of tokens when using dVAE, from nakano_dev
         output = self.decode_obs_tokens(observations) if self.slot_based else self.decode_obs_tokens()
+        
         return output, init_variables
     
     
@@ -229,8 +230,9 @@ class WorldModelEnv:
             if should_return_slots:
                 obs, color, mask = output 
                 return obs, reward, done, mems, color, mask, self.embedded_tokens 
+                #return obs, reward, done, mems, None, None, self.embedded_tokens 
             else:
-                obs, _, _ = output
+                #obs, _, _ = output
                 return obs, reward, done, mems, self.embedded_tokens
       
       

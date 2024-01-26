@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 from torch.distributions.categorical import Categorical
 import torch.nn as nn
-
+from typing import Any, Optional, Tuple
 from models.actor_critic import ActorCritic
 from models.tokenizer import Tokenizer
 from models.world_model import WorldModel
@@ -12,7 +12,7 @@ from utils import extract_state_dict
 
 
 class Agent(nn.Module):
-    def __init__(self, tokenizer: Tokenizer, world_model: WorldModel, actor_critic: ActorCritic, image_decoder: SpatialBroadcastDecoder):
+    def __init__(self, tokenizer: Tokenizer, world_model: WorldModel, actor_critic: ActorCritic, image_decoder: Optional[SpatialBroadcastDecoder]):
         super().__init__()
         self.tokenizer = tokenizer
         self.world_model = world_model
@@ -31,11 +31,11 @@ class Agent(nn.Module):
             self.world_model.load_state_dict(extract_state_dict(agent_state_dict, 'world_model'))
         if load_actor_critic:
             self.actor_critic.load_state_dict(extract_state_dict(agent_state_dict, 'actor_critic'))
-        if load_image_decoder:
-            self.image_decoder.load_state_dict(extract_state_dict(agent_state_dict, 'image_decoder'))
+        #if load_image_decoder:
+        #    self.image_decoder.load_state_dict(extract_state_dict(agent_state_dict, 'image_decoder'))
 
     def act(self, obs: torch.FloatTensor, should_sample: bool = True, temperature: float = 1.0, collecting: bool = False) -> torch.LongTensor:
         input_ac = obs if self.actor_critic.use_original_obs else torch.clamp(self.tokenizer.encode_decode(obs, should_preprocess=True, should_postprocess=True), 0, 1)
-        logits_actions = self.actor_critic(input_ac, collecting=collecting, tokenizer=self.tokenizer, wm=self.world_model).logits_actions[:, -1] / temperature
+        logits_actions = self.actor_critic.collecting(input_ac, collecting=collecting, wm=self.world_model).logits_actions[:, -1] / temperature
         act_token = Categorical(logits=logits_actions).sample() if should_sample else logits_actions.argmax(dim=-1)
         return act_token

@@ -212,9 +212,9 @@ class WorldModel(nn.Module):
 
         self.head_ends = Head(
             max_blocks=config.max_blocks,
-            block_mask=act_tokens_pattern,
+            block_mask=all_but_last_obs_tokens_pattern,
             head_module=nn.Sequential(
-                nn.Linear(embed_dim, embed_dim),
+                nn.Linear(embed_dim*(self.config.tokens_per_block-1), embed_dim),
                 nn.ReLU(),
                 nn.Linear(embed_dim, 2)
             )
@@ -274,7 +274,7 @@ class WorldModel(nn.Module):
             h, mems = self.transformer(inputs, tgt_length, stop_mask, mems, generation)
 
             logits_rewards = self.head_rewards(h, num_steps=num_steps, prev_steps=prev_steps)
-            logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps)
+            logits_ends = self.head_ends(h, num_steps=num_steps, prev_steps=prev_steps, rearr=True, tgt_length=tgt_length)
             embeddings = self.head_embeddings(h, num_steps=num_steps, prev_steps=prev_steps)
             return ContinuosWorldModelOutput(h, embeddings, logits_rewards, logits_ends, mems)
 
@@ -676,4 +676,3 @@ class OCWorldModel(WorldModel):
             plt.savefig(save_dir / f"ref_count_wm_{epoch}.png")
             plt.close()
             self._reset_count()
-

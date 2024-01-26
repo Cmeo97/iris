@@ -763,6 +763,7 @@ class TokenizerWithSAMEncoderOutput:
     z: torch.FloatTensor
     inits: torch.FloatTensor
     z_vit: torch.FloatTensor
+    tokens: torch.FloatTensor
 
 class OCSAMTokenizer(OCTokenizer):
     def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: MLPDecoder, slot_attn: Union[SlotAttention, SlotAttentionVideo], with_lpips: bool = True) -> None:
@@ -949,8 +950,9 @@ class OCSAMTokenizer(OCTokenizer):
         z = z.reshape(*shape[:-3], *z.shape[1:])
         inits = inits.reshape(*shape[:-3], *inits.shape[1:])
         z_vit = z_vit.reshape(*shape[:-3], *z_vit.shape[1:])
+        tokens = z
 
-        return TokenizerWithSAMEncoderOutput(z, inits, z_vit)
+        return TokenizerWithSAMEncoderOutput(z, inits, z_vit, tokens)
 
     def decode(self, z: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z.shape  # (..., C, D)
