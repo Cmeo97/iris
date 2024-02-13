@@ -104,7 +104,7 @@ class Trainer:
 
         tokenizer = instantiate(cfg.tokenizer)
         world_model = WorldModel(obs_vocab_size=tokenizer.vocab_size, act_vocab_size=env.num_actions, config=instantiate(cfg.world_model))
-        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model)
+        actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model, tokenizer=tokenizer)
         image_decoder = instantiate(cfg.image_decoder)
 
         self.agent = Agent(tokenizer, world_model, actor_critic, image_decoder).to(self.device)
@@ -127,6 +127,9 @@ class Trainer:
         self.scheduler_actor_critic = None
         self.scheduler_image_decoder = None
 
+        self.use_amp = cfg.common.use_amp
+        self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.common.use_amp)
+
         if cfg.initialization.path_to_checkpoint is not None:
             self.agent.load(**cfg.initialization, device=self.device)
 
@@ -147,6 +150,20 @@ class Trainer:
             #     for name, param in self.agent.tokenizer.quantizer.named_parameters():
             #         param.requires_grad = True
             #     self.agent.tokenizer.tau = 1.0
+
+            # if epoch == 100:
+            #     episode_manager_train = EpisodeDirManager(self.episode_dir / 'train', max_num_episodes=self.cfg.collection.train.num_episodes_to_save)
+
+            #     def create_env(cfg_env, num_envs):
+            #         env_fn = partial(instantiate, config=cfg_env)
+            #         return MultiProcessEnv(env_fn, num_envs, should_wait_num_envs_ratio=1.0) if num_envs > 1 else SingleProcessEnv(env_fn)
+
+            #     train_env = create_env(self.cfg.env.train, self.cfg.collection.train.num_envs)
+            #     self.train_dataset = instantiate(self.cfg.datasets.train)
+            #     self.train_dataset._check_upscale(self.upscale)
+            #     self.train_collector = Collector(train_env, self.train_dataset, episode_manager_train)
+            #     for _ in tqdm(range(25), desc="Recollecting dataset"):
+            #         self.train_collector.collect(self.agent, epoch, **self.cfg.collection.train.config)
 
             print(f"\nEpoch {epoch} / {self.cfg.common.epochs}\n")
             start_time = time.time()
@@ -225,23 +242,29 @@ class Trainer:
                 batch = self.train_dataset.sample_batch(batch_num_samples, sequence_length, sampling_weights, sample_from_start)
                 batch = self._to_device(batch)
 
-                if str(component) == 'image_decoder':
-                    with torch.no_grad():
-                        z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
-                    losses = component.compute_loss(batch, z, **kwargs_loss) / grad_acc_steps
-                else:
-                    losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
-                loss_total_step = losses.loss_total
-                loss_total_step.backward()
-                loss_total_epoch += loss_total_step.item() / steps_per_epoch
+                with torch.autocast('cuda', dtype=torch.float16, enabled=self.use_amp):
+                    if str(component) == 'image_decoder':
+                        with torch.no_grad():
+                            z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
+                        losses = component.compute_loss(batch, z, **kwargs_loss) / grad_acc_steps
+                    else:
+                        losses = component.compute_loss(batch, **kwargs_loss) / grad_acc_steps
+                    loss_total_step = losses.loss_total
+                    loss_total_epoch += loss_total_step.item() / steps_per_epoch
+
+                # loss_total_step.backward()
+                self.scaler.scale(loss_total_step).backward()
 
                 for loss_name, loss_value in losses.intermediate_losses.items():
                     intermediate_losses[f"{str(component)}/train/{loss_name}"] += loss_value / steps_per_epoch
 
             if max_grad_norm is not None:
+                self.scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(component.parameters(), max_grad_norm)
 
-            optimizer.step()
+            # optimizer.step()
+            self.scaler.step(optimizer)
+            self.scaler.update()
             if scheduler is not None:
                 scheduler.step()
 
@@ -277,7 +300,7 @@ class Trainer:
             if self.slot_based:
                 batch['observations'] = torch.cat([batch['observations'], tr_batch['observations']], dim=0)
                 make_reconstructions_with_slots_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer, image_decoder=self.agent.image_decoder)
-                # self.inspect_world_model(epoch)
+                self.inspect_world_model(epoch)
             else:
                 make_reconstructions_from_batch(batch, save_dir=self.reconstructions_dir, epoch=epoch, tokenizer=self.agent.tokenizer)
 
@@ -293,12 +316,13 @@ class Trainer:
         for batch in self.test_dataset.traverse(batch_num_samples, sequence_length):
             batch = self._to_device(batch)
 
-            if str(component) == 'image_decoder':
-                z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
-                losses = component.compute_loss(batch, z, **kwargs_loss)
-            else:
-                losses = component.compute_loss(batch, **kwargs_loss)
-            loss_total_epoch += losses.loss_total.item()
+            with torch.autocast('cuda', dtype=torch.float16, enabled=self.use_amp):
+                if str(component) == 'image_decoder':
+                    z, inits, z_vit, feat_recon = self.agent.tokenizer(batch['observations'], should_preprocess=True)
+                    losses = component.compute_loss(batch, z, **kwargs_loss)
+                else:
+                    losses = component.compute_loss(batch, **kwargs_loss)
+                loss_total_epoch += losses.loss_total.item()
 
             for loss_name, loss_value in losses.intermediate_losses.items():
                 intermediate_losses[f"{str(component)}/eval/{loss_name}"] += loss_value
@@ -320,7 +344,8 @@ class Trainer:
     def inspect_imagination(self, epoch: int) -> None:
         mode_str = 'imagination'
         batch = self.test_dataset.sample_batch(batch_num_samples=self.episode_manager_imagination.max_num_episodes, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
-        outputs = self.agent.actor_critic.imagine(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon, show_pbar=True)
+        with torch.autocast('cuda', dtype=torch.float16, enabled=self.use_amp):
+            outputs = self.agent.actor_critic.imagine(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon, show_pbar=True)
 
         to_log = []
         for i, (o, a, r, d) in enumerate(zip(outputs.observations.cpu(), outputs.actions.cpu(), outputs.rewards.cpu(), outputs.ends.long().cpu())):  # Make everything (N, T, ...) instead of (T, N, ...)
@@ -339,7 +364,8 @@ class Trainer:
     @torch.no_grad()
     def inspect_world_model(self, epoch: int) -> None:
         batch = self.train_dataset.sample_batch(batch_num_samples=5, sequence_length=1 + self.cfg.training.actor_critic.burn_in, sample_from_start=False)
-        recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
+        with torch.autocast('cuda', dtype=torch.float16, enabled=self.use_amp):
+            recons = self.agent.actor_critic.rollout(self._to_device(batch), self.agent.tokenizer, self.agent.world_model, horizon=self.cfg.evaluation.actor_critic.horizon-5, show_pbar=True)
         if self.agent.tokenizer.slot_based:
             recons, colors, masks = recons
         def save_sequence_image(observations, recons, save_dir, epoch, suffix='sample'):
