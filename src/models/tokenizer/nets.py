@@ -693,7 +693,7 @@ class SpatialBroadcastDecoder(nn.Module):
         return slot.repeat(1, 1, self.init_resolution[0], self.init_resolution[1])
     
     def compute_loss(self, batch, z, **kwargs) -> LossWithIntermediateLosses:
-        observations = self.preprocess_input(batch['observations'])
+        observations = batch['observations']
         shape = observations.shape
 
         reconstructions = self(rearrange(z, 'b t k d -> (b t) d k').unsqueeze(-1))
@@ -846,7 +846,9 @@ class SlotAttentionVideo(nn.Module):
                 nn.Linear(config.slot_dim, config.slot_dim),
             )
         elif config.prior_class.lower() == 'gru':
-            self.prior = nn.GRU(config.slot_dim, config.slot_dim)
+            self.prior = nn.GRU(config.slot_dim, config.slot_dim, batch_first=True)
+        elif config.prior_class.lower() == 'grucell':
+            self.prior = nn.GRUCell(config.slot_dim, config.slot_dim)
         elif config.prior_class.lower() == 'none' or config.prior_class.lower() == 'keep':
             self.prior = None
         else:
@@ -930,7 +932,9 @@ class SlotAttentionVideo(nn.Module):
                 if self.prior_class.lower() == 'mlp':
                     slots = self.prior(slots_init)
                 elif self.prior_class.lower() == 'gru':
-                    slots, hidden = self.prior(slots_init.view(-1, self.slot_dim), hidden)
+                    slots, hidden = self.prior(slots_init, hidden)
+                elif self.prior_class.lower() == 'grucell':
+                    slots = self.prior(slots_init.view(-1, self.slot_dim), hidden)
                     slots = slots.view(-1, self.num_slots, self.slot_dim)
                 elif self.prior_class.lower() == 'none':
                     pass
