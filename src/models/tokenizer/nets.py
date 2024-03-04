@@ -547,7 +547,6 @@ class AttnBlock(nn.Module):
         return x + h_
 
 
-
 @dataclass
 class SAConfig:
     num_slots: int
@@ -556,10 +555,12 @@ class SAConfig:
     channels_enc: int
     token_dim: int
     prior_class: str
+    pred_prior_from: str
 
     @property
     def slot_dim(self):
         return self.tokens_per_slot * self.token_dim
+
 
 class SAEncoder(nn.Module):
     def __init__(self, config: OCEncoderDecoderConfig) -> None:
@@ -604,13 +605,15 @@ class SAEncoder(nn.Module):
         out = self.lnorm(out)
         out = self.conv_1x1(out)
         return out
-    
+
+
 @dataclass
 class SBDConfig:
     resolution: int
     dec_input_dim: int # SBDecoder
     dec_hidden_dim: int # SBDecoder
     out_ch: int
+
 
 class SpatialBroadcastDecoder(nn.Module):
     def __init__(self, config: SBDConfig) -> None:
@@ -706,6 +709,7 @@ class SpatialBroadcastDecoder(nn.Module):
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
         """x is supposed to be channels first and in [0, 1]"""
         return x.mul(2).sub(1)
+
 
 class SlotAttention(nn.Module):
     def __init__(self, config: SAConfig, eps=1e-8, hidden_dim=128) -> None:
@@ -849,11 +853,12 @@ class SlotAttentionVideo(nn.Module):
             self.prior = nn.GRU(config.slot_dim, config.slot_dim, batch_first=True)
         elif config.prior_class.lower() == 'grucell':
             self.prior = nn.GRUCell(config.slot_dim, config.slot_dim)
-        elif config.prior_class.lower() == 'none' or config.prior_class.lower() == 'keep':
+        elif config.prior_class.lower() == 'none' or config.prior_class.lower() == 'tf':
             self.prior = None
         else:
             raise NotImplementedError("prior class not implemented")
         self.prior_class = config.prior_class
+        self.pred_prior_from = config.pred_prior_from
 
         self.predictor = TransformerEncoder(num_blocks=1, d_model=config.slot_dim, num_heads=4, dropout=0.1)
 
@@ -893,11 +898,10 @@ class SlotAttentionVideo(nn.Module):
         k *= self.scale
 
         slots_list = []
-        slots_init_list = []
+        dots_list = []
         hidden = None
         for t in range(T):
             slots_init = slots
-            slots_init_list += [slots_init]
 
             for i in range(self.iters):
                 slots_prev = slots
@@ -907,16 +911,8 @@ class SlotAttentionVideo(nn.Module):
                 dots = torch.bmm(k[:, t], q.transpose(-1, -2))
                 attn = dots.softmax(dim=-1) + self.eps
 
-                # attn_discrete = attn_c.round(decimals=0)
-                # attn = attn_c + (attn_c - attn_discrete).detach()
-
                 attn = attn / torch.sum(attn, dim=-2, keepdim=True)
                 updates = torch.bmm(attn.transpose(-1, -2), v[:, t])
-
-                # slots_dots = torch.bmm(updates, slots_prev.transpose(-1, -2))
-                # slots_attn = slots_dots.softmax(dim=-1)
-                # slots_attn = (slots_attn / torch.sum(slots_attn, dim=-2, keepdim=True)).round(decimals=0)
-                # updates = torch.bmm(slots_attn.transpose(-1, -2), updates)
 
                 slots = self.gru(updates.view(-1, self.slot_dim),
                                  slots_prev.view(-1, self.slot_dim))
@@ -927,29 +923,26 @@ class SlotAttentionVideo(nn.Module):
                     slots = slots + self.mlp(self.norm_pre_ff(slots))
                 
             slots_list += [slots]
+            dots_list += [dots.softmax(dim=-1)]
 
-            if t > 0:
-                if self.prior_class.lower() == 'mlp':
-                    slots = self.prior(slots_init)
-                elif self.prior_class.lower() == 'gru':
-                    slots, hidden = self.prior(slots_init, hidden)
-                elif self.prior_class.lower() == 'grucell':
-                    slots = self.prior(slots_init.view(-1, self.slot_dim), hidden)
-                    slots = slots.view(-1, self.num_slots, self.slot_dim)
-                elif self.prior_class.lower() == 'none':
-                    pass
-
-            # predictor
-            slots = self.predictor(slots)
-
-            if t > 0 and self.prior_class.lower() == 'keep':
-                slots = slots_init
+            # if prior_class = tf and pred_prior_from = last, STEVE
+            slots_to_predict_from = slots_init if self.pred_prior_from.lower() == 'init' else slots
+            if self.prior_class.lower() == 'mlp':
+                slots = self.prior(slots_to_predict_from)
+            elif self.prior_class.lower() == 'gru':
+                slots, hidden = self.prior(slots_to_predict_from, hidden)
+            elif self.prior_class.lower() == 'grucell':
+                slots = self.prior(slots_to_predict_from.view(-1, self.slot_dim), hidden)
+                slots = slots.view(-1, self.num_slots, self.slot_dim)
+            elif self.prior_class.lower() == 'tf':
+                slots = self.predictor(slots_to_predict_from)
+            elif self.prior_class.lower() == 'none':
+                pass
 
         slots_list = torch.stack(slots_list, dim=1)   # B, T, num_slots, slot_size
-        slots_init_list = torch.stack(slots_init_list, dim=1)
+        dots_list = torch.stack(dots_list, dim=1)
 
-        return slots_list, slots_init_list
-
+        return slots_list, dots_list
     
 
 def resize_patches_to_image(patches: torch.Tensor, size: Optional[int] = None, 
@@ -991,6 +984,7 @@ def resize_patches_to_image(patches: torch.Tensor, size: Optional[int] = None,
 
     return image.view(*patches.shape[:-1], image.shape[-2], image.shape[-1])
 
+
 @dataclass
 class OCEncoderDecoderWithViTConfig:
     resolution: int
@@ -1011,6 +1005,7 @@ class OCEncoderDecoderWithViTConfig:
     dec_hidden_layers: List[int] # MLPDecoder
     dec_output_dim: int # MLPDecoder
     
+
 class MLPDecoder(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()

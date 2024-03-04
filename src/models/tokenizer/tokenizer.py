@@ -761,12 +761,12 @@ class _VitFeatureHook:
 @dataclass
 class TokenizerWithSAMEncoderOutput:
     z: torch.FloatTensor
-    inits: torch.FloatTensor
     z_vit: torch.FloatTensor
+    attns: torch.FloatTensor
     tokens: torch.FloatTensor
 
 class OCSAMTokenizer(OCTokenizer):
-    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: MLPDecoder, slot_attn: Union[SlotAttention, SlotAttentionVideo], with_lpips: bool = True) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, encoder: Union[Encoder, SAEncoder], decoder: MLPDecoder, slot_attn: Union[SlotAttention, SlotAttentionVideo], const_type: str, const_coef: float, with_lpips: bool = True) -> None:
         super().__init__(vocab_size, embed_dim, encoder, decoder, slot_attn, with_lpips)
         self.vocab_size = vocab_size
         self.encoder = encoder
@@ -785,6 +785,9 @@ class OCSAMTokenizer(OCTokenizer):
         self.num_slots = slot_attn.config.num_slots
         self.tokens_per_slot = slot_attn.config.tokens_per_slot
         self.slot_based = True
+
+        self.const_type = const_type
+        self.const_coef = const_coef
 
     def __repr__(self) -> str:
         return "tokenizer"
@@ -852,37 +855,47 @@ class OCSAMTokenizer(OCTokenizer):
         outputs = self.encode(x, should_preprocess)
         decoder_input = outputs.z
         reconstructions = self.decode(decoder_input, should_postprocess)
-        return outputs.z, outputs.inits, outputs.z_vit, reconstructions
+        return outputs.z, outputs.attns, outputs.z_vit, reconstructions
 
     def compute_loss(self, batch: Batch, **kwargs: Any) -> LossWithIntermediateLosses:
         assert self.lpips is not None
         observations = self.preprocess_input(rearrange(batch['observations'], 'b t c h w -> (b t) c h w'))
         if self.slot_attn.is_video:
             observations = rearrange(observations, '(b t) c h w -> b t c h w', b=batch['observations'].shape[0]) # video
-        z, inits, z_vit, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
+        z, attns, z_vit, reconstructions = self(observations, should_preprocess=False, should_postprocess=False)
 
         reconstruction_loss = torch.pow(z_vit - reconstructions, 2).mean()
 
         # cosine similarity loss between consecutive frames
-        # z = inits ###
         if not self.slot_attn.is_video:
             z = rearrange(z, '(b t) k e -> b t k e', b=batch['observations'].shape[0])
         cosine_loss = 0.
-        for t in range(z.shape[1]-1):
-            z_curr = z[:, t]
-            z_next = z[:, t+1]
-            z_curr = z_curr / z_curr.norm(dim=-1, keepdim=True)
-            z_next = z_next / z_next.norm(dim=-1, keepdim=True)
-            # matrix of cosine similarities between all pairs of slots for each sample in batch
-            mat = torch.bmm(z_curr, z_next.transpose(1, 2))
-            # softmax of mat
-            mat = F.softmax(mat, dim=-1)
-            # cross entropy loss between mat and identity matrix
-            cosine_loss += F.cross_entropy(mat, torch.arange(self.num_slots, device=mat.device).expand(mat.shape[0], -1))
-        cosine_loss /= (z.shape[1]-1)
-        # cosine_loss *= self.tau
+        if self.const_type == "repr":
+            for t in range(z.shape[1]-1):
+                z_curr = z[:, t]
+                z_next = z[:, t+1]
+                z_curr = z_curr / z_curr.norm(dim=-1, keepdim=True)
+                z_next = z_next / z_next.norm(dim=-1, keepdim=True)
+                # matrix of cosine similarities between all pairs of slots for each sample in batch
+                mat = torch.bmm(z_curr, z_next.transpose(1, 2))
+                # softmax of mat
+                mat = F.softmax(mat, dim=-1)
+                # cross entropy loss between mat and identity matrix
+                cosine_loss += F.cross_entropy(mat, torch.arange(self.num_slots, device=mat.device).expand(mat.shape[0], -1))
+            cosine_loss /= (z.shape[1]-1)
+        elif self.const_type == "attn":
+            B, T, _, num_slots = attns.shape
+            for t in range(attns.shape[1]-1):
+                attn_curr = attns[:, t]
+                attn_next = attns[:, t+1]
+                attn_curr = attn_curr / attn_curr.norm(dim=1, keepdim=True)
+                attn_next = attn_next / attn_next.norm(dim=1, keepdim=True)
+                pairwise_sim = torch.bmm(attn_curr.transpose(1, 2), attn_next)
+                loss = torch.pow(torch.diagonal(pairwise_sim, dim1=-2, dim2=-1) - torch.ones(num_slots, device=pairwise_sim.device).expand(B, -1), 2).mean()
+                cosine_loss += loss
+            cosine_loss /= (attns.shape[1]-1)
 
-        return LossWithIntermediateLosses(reconstruction_loss=reconstruction_loss, cosine_loss=cosine_loss)
+        return LossWithIntermediateLosses(reconstruction_loss=reconstruction_loss, cosine_loss=cosine_loss * self.const_coef)
     
     def _transformer_compute_positions(self, features):
         """Compute positions for Transformer features."""
@@ -939,20 +952,18 @@ class OCSAMTokenizer(OCTokenizer):
             z = z.reshape(*shape[:-3], *z.shape[1:]) # video
             if z.dim() == 3:
                 z = z.unsqueeze(1)
-        z, inits = self.slot_attn(z)
+        z, attns = self.slot_attn(z)
         if self.slot_attn.is_video:
             z = z.view(-1, *z.shape[-2:]) # video
-            inits = inits.view(-1, *inits.shape[-2:]) # video
 
         z_vit, _ = self.vit_encode(x)
         
         # Reshape to original
         z = z.reshape(*shape[:-3], *z.shape[1:])
-        inits = inits.reshape(*shape[:-3], *inits.shape[1:])
         z_vit = z_vit.reshape(*shape[:-3], *z_vit.shape[1:])
         tokens = z
 
-        return TokenizerWithSAMEncoderOutput(z, inits, z_vit, tokens)
+        return TokenizerWithSAMEncoderOutput(z, z_vit, attns, tokens)
 
     def decode(self, z: torch.Tensor, should_postprocess: bool = False) -> torch.Tensor:
         shape = z.shape  # (..., C, D)

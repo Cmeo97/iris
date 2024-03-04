@@ -37,4 +37,7 @@ slot_attn:
     iters: 3
     channels_enc: 128
     token_dim: 128 # need to match embed_dim if no pre_process_conv
-    prior_class: gru
+    prior_class: grucell
+    pred_prior_from: last
+const_type: attn
+const_coef: 1.0
