@@ -117,7 +117,6 @@ class ActorCritic(nn.Module):
         else:
             x = inputs
       
-
         if self.latent_actor: 
             x = rearrange(self.tanh(self.linear(x)), 'b s e -> b (s e)')
 

@@ -107,6 +107,7 @@ class Trainer:
         actor_critic = ActorCritic(**cfg.actor_critic, act_vocab_size=env.num_actions, model=cfg.world_model.model, tokenizer=tokenizer)
         image_decoder = instantiate(cfg.image_decoder)
 
+
         self.agent = Agent(tokenizer, world_model, actor_critic, image_decoder).to(self.device)
         print(f'{sum(p.numel() for p in self.agent.tokenizer.parameters())} parameters in agent.tokenizer')
         print(f'{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model')
