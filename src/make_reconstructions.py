@@ -2,6 +2,7 @@ from einops import rearrange
 import numpy as np
 from PIL import Image
 import torch
+from torchvision.transforms import Resize
 from torchvision.utils import save_image
 
 
@@ -69,15 +70,21 @@ def make_reconstructions_with_slots_from_batch(batch, save_dir, epoch, tokenizer
         save_image_with_slots(batch['observations'], recons, colors, masks, save_dir, epoch, suffix="hard")
 
 def save_image_with_slots(observations, recons, colors, masks, save_dir, epoch, suffix='sample'):
-    b, t, _, h, w = observations.size()
+    b, t, _, h, w = recons.size()
 
     for i in range(b):
         obs = observations[i].cpu() # (t c h w)
         recon = recons[i].cpu() # (t c h w)
-
-        full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)
         color = colors[i].cpu()
         mask = masks[i].cpu()
+        if obs.shape[-1] > recon.shape[-1]:
+            obs = Resize((recon.shape[-1], recon.shape[-2]))(obs)
+            color = Resize((recon.shape[-1], recon.shape[-2]))(rearrange(color, 't k c h w -> (t k) c h w'))
+            mask = Resize((recon.shape[-1], recon.shape[-2]))(rearrange(mask, 't k c h w -> (t k) c h w'))
+            color = rearrange(color, '(t k) c h w -> t k c h w', t=t)
+            mask = rearrange(mask, '(t k) c h w -> t k c h w', t=t)
+
+        full_plot = torch.cat([obs.unsqueeze(1), recon.unsqueeze(1)], dim=1) # (t 2 c h w)      
         subimage = color * mask
         mask = mask.repeat(1,1,3,1,1)
         full_plot = torch.cat([full_plot, mask, subimage], dim=1) #(T,2+K+K,3,D,D)

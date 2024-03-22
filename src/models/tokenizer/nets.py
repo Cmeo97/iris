@@ -11,6 +11,7 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torchvision.transforms import Resize
 from omegaconf import ListConfig
 from utils import LossWithIntermediateLosses
 
@@ -652,10 +653,13 @@ class SpatialBroadcastDecoder(nn.Module):
             )
         if isinstance(resolution, int):
             resolution = (resolution, resolution)
-        # self.init_resolution = resolution if hidden_dim == 32 else (8, 8)
-        self.init_resolution = resolution if hidden_dim == 32 else (28, 28)
+        self.init_resolution = resolution if hidden_dim == 32 else (8, 8)
+        # self.init_resolution = resolution if hidden_dim == 32 else (28, 28)
         self.pos_embedding = PositionalEmbedding(self.init_resolution, config.dec_input_dim)
         self.resolution = resolution
+
+        self.downsample = Resize(size=self.resolution)
+
         self._init_params()
         print('Decoder initialized')
 
@@ -699,6 +703,8 @@ class SpatialBroadcastDecoder(nn.Module):
         observations = batch['observations']
         shape = observations.shape
 
+        observations = self.downsample(rearrange(observations, 'b t c h w -> (b t) c h w'))
+        observations = rearrange(observations, '(b t) c h w -> b t c h w', b=shape[0], t=shape[1])
         reconstructions = self(rearrange(z, 'b t k d -> (b t) d k').unsqueeze(-1))
         reconstructions = rearrange(reconstructions, '(b t) c h w -> b t c h w', b=shape[0])
 

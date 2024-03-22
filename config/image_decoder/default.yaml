@@ -1,7 +1,7 @@
 _target_: models.tokenizer.SpatialBroadcastDecoder
 config:
   _target_: models.tokenizer.SBDConfig
-  resolution: 224
+  resolution: 64
   dec_input_dim: 128
   dec_hidden_dim: 64
   out_ch: 4
