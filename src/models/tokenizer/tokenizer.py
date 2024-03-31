@@ -888,8 +888,8 @@ class OCSAMTokenizer(OCTokenizer):
             for t in range(attns.shape[1]-1):
                 attn_curr = attns[:, t]
                 attn_next = attns[:, t+1]
-                attn_curr = attn_curr / attn_curr.norm(dim=1, keepdim=True)
-                attn_next = attn_next / attn_next.norm(dim=1, keepdim=True)
+                attn_curr = attn_curr / attn_curr.norm(dim=-2, keepdim=True)
+                attn_next = attn_next / attn_next.norm(dim=-2, keepdim=True)
                 pairwise_sim = torch.bmm(attn_curr.transpose(1, 2), attn_next)
                 loss = torch.pow(torch.diagonal(pairwise_sim, dim1=-2, dim2=-1) - torch.ones(num_slots, device=pairwise_sim.device).expand(B, -1), 2).mean()
                 cosine_loss += loss
